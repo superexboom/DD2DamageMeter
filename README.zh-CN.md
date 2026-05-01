@@ -39,7 +39,8 @@ DD2 Damage Meter 是一个用于《Darkest Dungeon II》的非官方 BepInEx 插
 ## 环境要求
 
 - 《Darkest Dungeon II》
-- 游戏目录中已安装 BepInEx
+- 游戏目录中已安装 BepInEx 5.x。理论上 BepInEx 5.0+ 即可；插件当前使用 BepInEx 5.4.23.5 测试。
+- 需要使用常规 Unity/Mono 版 BepInEx，不要使用 IL2CPP 版。
 - 能够构建 `net48` 的 .NET SDK 或构建工具
 - 来自游戏 `Darkest Dungeon II_Data/Managed` 目录的程序集文件
 

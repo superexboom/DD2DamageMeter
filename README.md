@@ -39,7 +39,8 @@ The plugin is intended for local gameplay analysis and debugging. It is not affi
 ## Requirements
 
 - *Darkest Dungeon II*
-- BepInEx installed in the game directory
+- BepInEx 5.x installed in the game directory. BepInEx 5.0+ should work in principle; the plugin is currently tested with BepInEx 5.4.23.5.
+- Use the regular Unity/Mono BepInEx build, not the IL2CPP build.
 - .NET SDK or build tools capable of building `net48`
 - Game assemblies available from the game's `Darkest Dungeon II_Data/Managed` directory
 
