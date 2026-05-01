@@ -9,6 +9,10 @@
     <OutputPath>bin\$(Configuration)\</OutputPath>
   </PropertyGroup>
 
+  <ItemGroup>
+    <Compile Remove="IronCrown\**\*.cs" />
+  </ItemGroup>
+
   <!-- BepInEx -->
   <ItemGroup>
     <Reference Include="BepInEx">

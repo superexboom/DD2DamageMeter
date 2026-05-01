@@ -106,6 +106,7 @@ namespace DD2DamageMeter
             {
                 // Stats tracker
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Actor.Events.EventActorHealthDamage>(evt => _tracker.OnHealthDamage(evt), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Actor.Events.EventActorHealthHeal>(evt => _tracker.OnHealthHeal(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventStressDamage>(evt => _tracker.OnStressDamage(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Skill.Events.EventSkillFinalizeResults>(evt => _tracker.OnSkillFinalizeResults(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Actor.Events.EventActorDeath>(evt => _tracker.OnActorDeath(evt), false, 0);

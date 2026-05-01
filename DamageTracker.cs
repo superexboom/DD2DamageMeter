@@ -7,6 +7,7 @@ using Assets.Code.Combat.Events;
 using Assets.Code.Events;
 using Assets.Code.Library;
 using Assets.Code.Skill.Events;
+using Assets.Code.Source;
 using Assets.Code.Utils;
 using UnityEngine;
 
@@ -285,6 +286,23 @@ namespace DD2DamageMeter
             catch (Exception ex) { Plugin.Log.LogWarning($"OnHealthDamage error: {ex.Message}"); }
         }
 
+        public void OnHealthHeal(EventActorHealthHeal evt)
+        {
+            try
+            {
+                lock (_lock)
+                {
+                    if (evt.m_SourceType != SourceType.TOKEN || evt.m_HealthChange <= 0.01f) return;
+
+                    var s = GetOrCreate(evt.m_ActorGuid, evt.m_TeamIndex);
+                    s.TotalHealingReceived += evt.m_HealthChange;
+                    s.TotalHealingDone += evt.m_HealthChange;
+                    UpdateAndMarkDirty();
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"OnHealthHeal error: {ex.Message}"); }
+        }
+
         public void OnStressDamage(EventStressDamage evt)
         {
             try { lock (_lock) { var s = GetOrCreate(evt.m_ActorGuid, evt.m_TeamIndex); s.TotalStressReceived += evt.m_StressDamageAmount; UpdateAndMarkDirty(); } }
@@ -327,7 +345,7 @@ namespace DD2DamageMeter
                         if (ar.IsDamaging || ar.IsBlocked)
                         {
                             var ts = GetOrCreate(arTid, ar.m_TargetTeamIndex);
-                            float rawDmg = ar.BaseHealthDamage; // pre-shield damage
+                            float rawDmg = Mathf.Max(ar.BaseHealthDamage, ar.HealthDamage);
                             if (rawDmg > 0f) ts.RawDamageReceived += rawDmg;
                         }
                         if (ar.IsHealthHeal) { ps.TotalHealingDone += ar.HealthHeal; GetOrCreate(arTid, ar.m_TargetTeamIndex).TotalHealingReceived += ar.HealthHeal; }
