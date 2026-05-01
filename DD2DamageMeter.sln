@@ -1,0 +1,30 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.5.2.0
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DD2DamageMeter", "DD2DamageMeter.csproj", "{6DDC6A1A-8DB4-9398-0734-E5A555D8D994}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "IronCrown", "IronCrown\IronCrown.csproj", "{386A1AE1-0B89-DE0F-7A71-AB02F5B138E5}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{6DDC6A1A-8DB4-9398-0734-E5A555D8D994}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{6DDC6A1A-8DB4-9398-0734-E5A555D8D994}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{6DDC6A1A-8DB4-9398-0734-E5A555D8D994}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{6DDC6A1A-8DB4-9398-0734-E5A555D8D994}.Release|Any CPU.Build.0 = Release|Any CPU
+		{386A1AE1-0B89-DE0F-7A71-AB02F5B138E5}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{386A1AE1-0B89-DE0F-7A71-AB02F5B138E5}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{386A1AE1-0B89-DE0F-7A71-AB02F5B138E5}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{386A1AE1-0B89-DE0F-7A71-AB02F5B138E5}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {B4909A98-E5FD-4AC5-A9CD-579EC4542060}
+	EndGlobalSection
+EndGlobal

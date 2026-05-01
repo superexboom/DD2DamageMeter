@@ -1,0 +1,16 @@
+<Project>
+  <PropertyGroup>
+    <!--
+      Adjust these paths to match your DD2 installation:
+
+      BepInExDir: Path to BepInEx folder inside the game directory
+      ManagedDir: Path to the game's Managed DLL folder
+
+      Example:
+        BepInExDir = D:\SteamLibrary\steamapps\common\Darkest Dungeon 2\BepInEx
+        ManagedDir = D:\SteamLibrary\steamapps\common\Darkest Dungeon 2\Darkest Dungeon 2_Data\Managed
+    -->
+    <BepInExDir>F:\SteamLibrary\steamapps\common\Darkest Dungeon® II\BepInEx</BepInExDir>
+<ManagedDir>F:\SteamLibrary\steamapps\common\Darkest Dungeon® II\Darkest Dungeon II_Data\Managed</ManagedDir>
+  </PropertyGroup>
+</Project>
