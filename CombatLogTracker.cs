@@ -99,6 +99,9 @@ namespace DD2DamageMeter
         private readonly StatusTotals _statusTotals = new StatusTotals();
         private readonly List<StatusSourceHint> _statusHints = new List<StatusSourceHint>();
         private readonly Dictionary<uint, ProjectedHealth> _dotProjectedHp = new Dictionary<uint, ProjectedHealth>();
+        private readonly DotSourceTracker _dotSources = new DotSourceTracker();
+        private readonly FloorDotSourceTracker _floorDotSources = new FloorDotSourceTracker();
+        private readonly Dictionary<uint, List<uint>> _maledictionSources = new Dictionary<uint, List<uint>>();
         private const int MaxStatusHints = 120;
 
         // DOT tracking: cache dot instances to resolve performers
@@ -268,6 +271,9 @@ namespace DD2DamageMeter
                 _pendingDotTicks.Clear();
                 _statusHints.Clear();
                 _dotProjectedHp.Clear();
+                _dotSources.Reset();
+                _floorDotSources.Reset();
+                _maledictionSources.Clear();
                 _statusTotals.Clear();
                 _dirty = true;
                 _statusDirty = true;
@@ -292,6 +298,7 @@ namespace DD2DamageMeter
             {
                 lock (_lock)
                 {
+                    _floorDotSources.OnSkillFinalizeResults(evt, IsPlayerTeam);
                     uint pid = evt.PerformerGuid;
                     int pt = evt.m_PerformerTeamIndex;
                     string pName = ResolveName(pid);
@@ -625,6 +632,14 @@ namespace DD2DamageMeter
             {
                 lock (_lock)
                 {
+                    if (evt?.Buff != null && IsMaledictionSource(evt.Buff.Id, evt.SourceId) &&
+                        evt.PerformerActorGuid != 0 && evt.TargetActorGuid != 0 &&
+                        evt.PerformerActorGuid != evt.TargetActorGuid &&
+                        IsPlayerTeam(evt.PerformerActorGuid))
+                    {
+                        AddIndirectDotSource(evt.TargetActorGuid, evt.PerformerActorGuid);
+                    }
+
                     if (!ShouldLogBuff(evt.Buff)) return;
                     string sourceName = evt.PerformerActorGuid != 0 ? ResolveName(evt.PerformerActorGuid) : FormatSourceLabel(evt.SourceType);
                     bool sourceIsPlayer = evt.PerformerActorGuid != 0 && IsPlayerTeam(evt.PerformerActorGuid);
@@ -644,6 +659,9 @@ namespace DD2DamageMeter
             {
                 lock (_lock)
                 {
+                    if (evt?.Buff != null && IsMaledictionSource(evt.Buff.Id, evt.SourceId))
+                        RemoveIndirectDotSource(evt.ActorGuid, evt.SourceActorGuid);
+
                     if (!ShouldLogBuff(evt.Buff)) return;
                     string sourceName = evt.SourceActorGuid != 0 ? ResolveName(evt.SourceActorGuid) : FormatSourceLabel(evt.Source);
                     bool sourceIsPlayer = evt.SourceActorGuid != 0 && IsPlayerTeam(evt.SourceActorGuid);
@@ -852,6 +870,8 @@ namespace DD2DamageMeter
                 lock (_lock)
                 {
                     if (evt.m_Actor == null || evt.m_DotDefinition == null) return;
+                    _floorDotSources.OnDotAdded(evt, IsPlayerTeam);
+                    _dotSources.OnDotAdded(evt, ResolveIndirectDotSource);
                     uint targetGuid = evt.m_Actor.ActorGuid;
                     string dotDefId = evt.m_DotDefinition.m_Id ?? "";
                     string dotType = evt.m_DotDefinition.m_Type ?? "";
@@ -873,6 +893,18 @@ namespace DD2DamageMeter
             catch (Exception ex) { Plugin.Log.LogWarning($"OnDotAdded error: {ex.Message}"); }
         }
 
+        public void OnDotRemoved(EventDotRemoved evt)
+        {
+            try
+            {
+                lock (_lock)
+                {
+                    _dotSources.OnDotRemoved(evt);
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"OnDotRemoved error: {ex.Message}"); }
+        }
+
         public void OnDotApplied(EventDotApplied evt)
         {
             try
@@ -884,7 +916,11 @@ namespace DD2DamageMeter
                     string dotType = evt.m_dotType ?? "unknown";
                     var result = evt.m_effectApplyCombinedResult;
                     
-                    if (result == null) return;
+                    if (result == null)
+                    {
+                        _dotSources.ApplyExpired(targetGuid, dotType);
+                        return;
+                    }
                     
                     var (healthChange, performerGuids, sourceIds) = ExtractFromCombinedResult(result);
                     
@@ -892,9 +928,6 @@ namespace DD2DamageMeter
                     
                     // Try to find cached source info for this dot
                     string displayDotType = ToDisplayName(dotType);
-                    uint bestPerformerGuid = 0;
-                    string sourceName = "[DOT]";
-                    bool sourceIsPlayer = false;
                     string skillId = "";
                     
                     // Search cache for matching dot type on this target
@@ -907,65 +940,63 @@ namespace DD2DamageMeter
                             break;
                         }
                     }
-                    
-                    // Get performer from EffectApplyCombinedResult (via reflection)
-                    if (performerGuids.Count > 0)
-                    {
-                        bestPerformerGuid = performerGuids[0];
-                        sourceName = ResolveName(bestPerformerGuid);
-                        // Determine if performer is player (team index 0)
-                        sourceIsPlayer = IsPlayerTeam(bestPerformerGuid);
-                    }
-                    
-                    // Store in pending ticks for HealthDamage handler
-                    var resolved = new DotResolvedInfo
-                    {
-                        DotType = displayDotType,
-                        PerformerGuid = bestPerformerGuid,
-                        SourceName = sourceName,
-                        SourceIsPlayer = sourceIsPlayer,
-                        SkillId = skillId,
-                        Value = rawAmount
-                    };
-                    _pendingDotTicks[(targetGuid, dotType)] = resolved;
-                    
+
                     // Log both DOT damage and HoT heal
                     bool isDamage = result.HealthChange < -0.01f;
                     bool isHeal = result.HealthChange > 0.01f;
                     if (rawAmount > 0.01f)
                     {
                         float displayAmount = rawAmount;
-                        float overkill = 0f;
                         if (isDamage)
                         {
                             displayAmount = GetEffectiveDotDamage(targetGuid, rawAmount);
-                            overkill = Mathf.Max(0f, rawAmount - displayAmount);
                         }
-                        string tName = ResolveName(targetGuid);
-                        bool tIsPlayer = (evt.m_effectApplyCombinedResult?.HealthChange < 0) ? false : IsPlayerTeam(targetGuid);
-                        // HealthChange < 0 means damage dealt TO target, so target receives it
-                        tIsPlayer = IsPlayerTeam(targetGuid);
-                        
-                        string tName2 = ResolveName(targetGuid);
-                        bool tIsPlayer2 = IsPlayerTeam(targetGuid);
-                        Entries.Add(new LogEntry
+
+                        var shares = _dotSources.GetShares(targetGuid, dotType, result, rawAmount, displayAmount);
+                        string targetName = ResolveName(targetGuid);
+                        bool targetIsPlayer = IsPlayerTeam(targetGuid);
+                        for (int i = 0; i < shares.Count; i++)
                         {
-                            Round = _currentRound, 
-                            SourceName = sourceName, 
-                            TargetName = tName2,
-                            SourceIsPlayer = sourceIsPlayer, 
-                            TargetIsPlayer = tIsPlayer2,
-                            ActionType = isDamage ? "DOT" : "HEAL", 
-                            Value = displayAmount,
-                            SkillId = skillId, 
-                            Extra = JoinExtras(isHeal ? "(HoT)" : "", FormatOverkill(overkill)),
-                            DotType = isDamage ? displayDotType : "",
-                            OverkillDamage = overkill
-                        });
+                            var share = shares[i];
+                            string shareSkillId = !string.IsNullOrEmpty(skillId) ? skillId : (share.SourceId ?? "");
+                            string sourceName = share.SourceActorGuid != 0 ? ResolveName(share.SourceActorGuid) : "[DOT]";
+                            bool sourceIsPlayer = share.SourceActorGuid != 0 && IsPlayerTeam(share.SourceActorGuid);
+                            float value = isDamage ? share.EffectiveAmount : share.RawAmount;
+                            float overkill = isDamage ? share.OverkillAmount : 0f;
+
+                            Entries.Add(new LogEntry
+                            {
+                                Round = _currentRound,
+                                SourceName = sourceName,
+                                TargetName = targetName,
+                                SourceIsPlayer = sourceIsPlayer,
+                                TargetIsPlayer = targetIsPlayer,
+                                ActionType = isDamage ? "DOT" : "HEAL",
+                                Value = value,
+                                SkillId = shareSkillId,
+                                Extra = JoinExtras(isHeal ? "(HoT)" : "", FormatOverkill(overkill)),
+                                DotType = isDamage ? displayDotType : "",
+                                OverkillDamage = overkill
+                            });
+
+                            if (i == 0)
+                            {
+                                _pendingDotTicks[(targetGuid, dotType)] = new DotResolvedInfo
+                                {
+                                    DotType = displayDotType,
+                                    PerformerGuid = share.SourceActorGuid,
+                                    SourceName = sourceName,
+                                    SourceIsPlayer = sourceIsPlayer,
+                                    SkillId = shareSkillId,
+                                    Value = rawAmount
+                                };
+                            }
+                        }
                         _dirty = true;
-                        
-                        Plugin.Log.LogDebug($"DotApplied: {sourceName} -> {tName}: {displayDotType} {displayAmount:F1} HP (skill={skillId}, ovk={overkill:F1})");
+
+                        Plugin.Log.LogDebug($"DotApplied: {shares.Count} source(s) -> {targetName}: {displayDotType} {displayAmount:F1} HP (skill={skillId})");
                     }
+                    _dotSources.ApplyExpired(targetGuid, dotType);
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"OnDotApplied error: {ex.Message}"); }
@@ -987,6 +1018,69 @@ namespace DD2DamageMeter
                 }
             }
             catch { }
+        }
+
+        private uint ResolveIndirectDotSource(ActorInstance targetActor, string dotId, string dotType, uint currentSourceActorGuid, SourceType sourceType, string sourceId)
+        {
+            uint floorSource = _floorDotSources.ResolveDotSource(targetActor, dotId, dotType, currentSourceActorGuid, sourceType, sourceId, IsPlayerTeam);
+            if (floorSource != 0) return floorSource;
+
+            uint targetGuid = targetActor != null ? targetActor.ActorGuid : 0;
+            if (!IsMaledictionDotType(dotType, dotId)) return 0;
+            if (currentSourceActorGuid != 0 && currentSourceActorGuid != targetGuid && IsPlayerTeam(currentSourceActorGuid))
+                return 0;
+
+            if (!_maledictionSources.TryGetValue(targetGuid, out var sources) || sources.Count == 0)
+                return 0;
+
+            for (int i = sources.Count - 1; i >= 0; i--)
+            {
+                if (sources[i] != 0) return sources[i];
+            }
+            return 0;
+        }
+
+        private static bool IsMaledictionSource(string buffId, string sourceId)
+        {
+            return ContainsId(buffId, "malediction") || ContainsId(sourceId, "malediction");
+        }
+
+        private static bool IsMaledictionDotType(string dotType, string dotId)
+        {
+            return ContainsId(dotType, "bleed") ||
+                   ContainsId(dotType, "blight") ||
+                   ContainsId(dotType, "burn") ||
+                   ContainsId(dotId, "bleed") ||
+                   ContainsId(dotId, "blight") ||
+                   ContainsId(dotId, "burn");
+        }
+
+        private static bool ContainsId(string value, string needle)
+        {
+            return !string.IsNullOrEmpty(value) &&
+                   value.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private void AddIndirectDotSource(uint targetGuid, uint sourceGuid)
+        {
+            if (!_maledictionSources.TryGetValue(targetGuid, out var sources))
+            {
+                sources = new List<uint>();
+                _maledictionSources[targetGuid] = sources;
+            }
+            if (!sources.Contains(sourceGuid))
+                sources.Add(sourceGuid);
+        }
+
+        private void RemoveIndirectDotSource(uint targetGuid, uint sourceGuid)
+        {
+            if (!_maledictionSources.TryGetValue(targetGuid, out var sources)) return;
+            if (sourceGuid == 0)
+                sources.Clear();
+            else
+                sources.RemoveAll(guid => guid == sourceGuid);
+            if (sources.Count == 0)
+                _maledictionSources.Remove(targetGuid);
         }
 
         private static bool IsPlayerTeam(uint guid)

@@ -33,8 +33,10 @@ The plugin is intended for local gameplay analysis and debugging. It is not affi
 - `Log`: open or close the battle log.
 - `Buff/Debuff`: open or close the dedicated status log from the battle log window.
 - `Record Run`: start or stop multi-battle run recording.
+- `Auto Rec`: save whether run recording should start automatically when the plugin loads.
 - `Run Stats`: show merged statistics for recorded battles.
 - `Export CSV`: export run statistics to CSV.
+- `Export Dir`: set the folder used for TXT and CSV exports.
 
 ## Requirements
 
@@ -66,10 +68,12 @@ The compiled plugin DLL is produced under `bin\Debug\net48\` or `bin\Release\net
 
 ## Exports
 
-Exports are written next to the loaded plugin DLL:
+Exports are written to the configured export folder. By default, this is the loaded plugin DLL folder:
 
 - `DD2_Report_yyyyMMdd_HHmmss.txt`: current battle report.
 - `DD2_Run_yyyyMMdd_HHmmss.csv`: recorded run statistics.
+
+Settings are saved by BepInEx in `BepInEx\config\com.dd2.damagemeter.cfg`.
 
 ## Notes
 

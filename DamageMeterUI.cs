@@ -30,6 +30,7 @@ namespace DD2DamageMeter
         private GUIStyle _windowStyle;
         private GUIStyle _totalStyle;
         private GUIStyle _resizeStyle;
+        private GUIStyle _checkStyle;
         private bool _stylesInitialized;
 
         // Textures for semi-transparent backgrounds
@@ -48,6 +49,16 @@ namespace DD2DamageMeter
         public Action OnExportCsv;
         public Func<bool> IsRecording;
         public Func<int> BattleCount;
+        public Func<bool> IsAutoRecordingEnabled;
+        public Action<bool> OnAutoRecordingChanged;
+        public Func<string> GetExportDirectory;
+        public Action<string> OnExportDirectoryChanged;
+
+        private Rect _settingsRect = new Rect(20f, 320f, 540f, 130f);
+        private bool _showSettings;
+        private bool _exportDirectoryEditInitialized;
+        private string _exportDirectoryEdit = "";
+        private string _settingsMessage = "";
 
         // Scale factor based on screen resolution
         private float _scaleFactor = 1f;
@@ -140,6 +151,16 @@ namespace DD2DamageMeter
                 normal = { textColor = new Color(0.6f, 0.6f, 0.6f, 0.8f) }
             };
 
+            _checkStyle = new GUIStyle(GUI.skin.toggle)
+            {
+                fontSize = 11,
+                fontStyle = FontStyle.Bold,
+                normal = { textColor = Color.white },
+                onNormal = { textColor = Color.white },
+                hover = { textColor = Color.white },
+                onHover = { textColor = Color.white }
+            };
+
             _stylesInitialized = true;
         }
 
@@ -170,6 +191,11 @@ namespace DD2DamageMeter
             // Adjust window rect for scaled coordinates
             _windowRect = GUI.Window(729001, _windowRect, DrawWindow, "<b>DD2 Damage Meter</b>  [F2] Hide  [F3] Reset  [F4] Export", _windowStyle);
             _windowRect = UiUtil.ClampToScreen(_windowRect, _scaleFactor);
+            if (_showSettings)
+            {
+                _settingsRect = GUI.Window(729005, _settingsRect, DrawSettingsWindow, "DD2 Damage Meter Settings", _windowStyle);
+                _settingsRect = UiUtil.ClampToScreen(_settingsRect, _scaleFactor);
+            }
 
             GUI.matrix = prevMatrix;
             HandleResize();
@@ -230,12 +256,20 @@ namespace DD2DamageMeter
                     Color prevBg2 = GUI.backgroundColor;
                     GUI.backgroundColor = recording ? new Color(0.9f, 0.3f, 0.3f) : new Color(0.4f, 0.4f, 0.4f);
                     string recLabel = recording ? $"Recording ({BattleCount?.Invoke() ?? 0})" : "Record Run";
-                    if (GUILayout.Button(recLabel, _toggleStyle, GUILayout.Width(160))) OnToggleRecording?.Invoke();
+                    if (GUILayout.Button(recLabel, _toggleStyle, GUILayout.Width(150))) OnToggleRecording?.Invoke();
                     GUI.backgroundColor = new Color(0.6f, 0.8f, 0.6f);
-                    if (GUILayout.Button("Run Stats", _toggleStyle, GUILayout.Width(90))) OnShowRunStats?.Invoke();
+                    if (GUILayout.Button("Run Stats", _toggleStyle, GUILayout.Width(85))) OnShowRunStats?.Invoke();
                     GUI.backgroundColor = new Color(0.6f, 0.7f, 0.9f);
-                    if (GUILayout.Button("Export CSV", _toggleStyle, GUILayout.Width(100))) OnExportCsv?.Invoke();
+                    if (GUILayout.Button("Export CSV", _toggleStyle, GUILayout.Width(95))) OnExportCsv?.Invoke();
                     GUI.backgroundColor = prevBg2;
+                    bool autoRecording = IsAutoRecordingEnabled?.Invoke() ?? false;
+                    bool nextAutoRecording = GUILayout.Toggle(autoRecording, "Auto Rec", _checkStyle, GUILayout.Width(80));
+                    if (nextAutoRecording != autoRecording) OnAutoRecordingChanged?.Invoke(nextAutoRecording);
+                    if (GUILayout.Button("Export Dir", _toggleStyle, GUILayout.Width(90)))
+                    {
+                        _showSettings = !_showSettings;
+                        if (_showSettings) LoadExportDirectoryEdit();
+                    }
                 }
                 GUILayout.EndHorizontal();
 
@@ -283,6 +317,45 @@ namespace DD2DamageMeter
             }
             GUILayout.EndVertical();
             GUI.DragWindow(new Rect(0, 0, _windowWidth, _windowHeight - RESIZE_HANDLE));
+        }
+
+        private void LoadExportDirectoryEdit()
+        {
+            _exportDirectoryEdit = GetExportDirectory?.Invoke() ?? "";
+            _exportDirectoryEditInitialized = true;
+            _settingsMessage = "";
+        }
+
+        private void DrawSettingsWindow(int id)
+        {
+            if (!_exportDirectoryEditInitialized) LoadExportDirectoryEdit();
+
+            GUILayout.BeginVertical();
+            {
+                GUILayout.Label("Export Directory", _headerStyle);
+                GUILayout.BeginHorizontal();
+                {
+                    _exportDirectoryEdit = GUILayout.TextField(_exportDirectoryEdit ?? "", GUILayout.Width(400));
+                    if (GUILayout.Button("Save", _toggleStyle, GUILayout.Width(55)))
+                    {
+                        OnExportDirectoryChanged?.Invoke(_exportDirectoryEdit ?? "");
+                        _settingsMessage = "Saved";
+                    }
+                    if (GUILayout.Button("Reset", _toggleStyle, GUILayout.Width(55)))
+                    {
+                        _exportDirectoryEdit = "";
+                        OnExportDirectoryChanged?.Invoke("");
+                        _settingsMessage = "Default";
+                    }
+                }
+                GUILayout.EndHorizontal();
+                if (!string.IsNullOrEmpty(_settingsMessage))
+                {
+                    GUILayout.Label(_settingsMessage, _labelStyle);
+                }
+            }
+            GUILayout.EndVertical();
+            GUI.DragWindow(new Rect(0, 0, _settingsRect.width, _settingsRect.height));
         }
 
         private void DrawActorRow(DamageTracker.ActorStats s, float teamTotalDmg, float maxDmg, float[] cw, int rowIndex)

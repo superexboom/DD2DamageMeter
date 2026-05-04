@@ -33,8 +33,10 @@ DD2 Damage Meter 是一个用于《Darkest Dungeon II》的非官方 BepInEx 插
 - `Log`：打开或关闭战斗日志。
 - `Buff/Debuff`：从战斗日志窗口打开或关闭独立状态日志。
 - `Record Run`：开始或停止多场战斗记录。
+- `Auto Rec`：保存插件加载时是否自动开始整局记录。
 - `Run Stats`：查看已记录战斗的合并统计。
 - `Export CSV`：导出整局统计 CSV。
+- `Export Dir`：设置 TXT 和 CSV 导出文件夹。
 
 ## 环境要求
 
@@ -66,10 +68,12 @@ dotnet build .\DD2DamageMeter.csproj
 
 ## 导出
 
-导出文件会写到已加载插件 DLL 所在目录：
+导出文件会写到已配置的导出文件夹。默认情况下，该目录是已加载插件 DLL 所在目录：
 
 - `DD2_Report_yyyyMMdd_HHmmss.txt`：当前战斗报告。
 - `DD2_Run_yyyyMMdd_HHmmss.csv`：已记录整局统计。
+
+设置由 BepInEx 保存到 `BepInEx\config\com.dd2.damagemeter.cfg`。
 
 ## 注意事项
 

@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Reflection;
 using Assets.Code.Actor;
 using Assets.Code.Actor.Events;
+using Assets.Code.Buff.Events;
 using Assets.Code.Combat.Events;
+using Assets.Code.Dot.Events;
 using Assets.Code.Events;
 using Assets.Code.Library;
 using Assets.Code.Skill.Events;
@@ -38,8 +40,9 @@ namespace DD2DamageMeter
             public float DotDamageReceived;
         }
 
-        // DOT source tracking: (targetGuid, dotDefId) -> performerGuid
-        private readonly Dictionary<(uint target, string dotDefId), uint> _dotPerformerCache = new Dictionary<(uint, string), uint>();
+        private readonly DotSourceTracker _dotSources = new DotSourceTracker();
+        private readonly FloorDotSourceTracker _floorDotSources = new FloorDotSourceTracker();
+        private readonly Dictionary<uint, List<uint>> _maledictionSources = new Dictionary<uint, List<uint>>();
         private readonly Dictionary<uint, ProjectedHealth> _dotProjectedHp = new Dictionary<uint, ProjectedHealth>();
         // Boss phase detection: guid -> last known name
         private readonly Dictionary<uint, string> _lastKnownName = new Dictionary<uint, string>();
@@ -136,46 +139,68 @@ namespace DD2DamageMeter
             return count;
         }
 
-        public void OnDotAdded(Assets.Code.Dot.Events.EventDotAdded evt)
+        public void OnDotAdded(EventDotAdded evt)
         {
             try
             {
                 lock (_lock)
                 {
                     if (evt.m_Actor == null || evt.m_DotDefinition == null) return;
+                    _floorDotSources.OnDotAdded(evt, guid => ResolveTeamIndex(guid) == 0);
+                    _dotSources.OnDotAdded(evt, ResolveIndirectDotSource);
                 }
             }
             catch { }
         }
 
-        public void OnDotApplied(Assets.Code.Dot.Events.EventDotApplied evt)
+        public void OnDotRemoved(EventDotRemoved evt)
         {
             try
             {
                 lock (_lock)
                 {
-                    if (evt.m_effectApplyCombinedResult == null) return;
-                    float healthChange = evt.m_effectApplyCombinedResult.HealthChange;
+                    _dotSources.OnDotRemoved(evt);
+                }
+            }
+            catch { }
+        }
+
+        public void OnDotApplied(EventDotApplied evt)
+        {
+            try
+            {
+                lock (_lock)
+                {
                     uint targetGuid = evt.m_actorGuid;
-                    uint performerGuid = ExtractPerformerGuid(evt.m_effectApplyCombinedResult);
+                    string dotType = evt.m_dotType ?? "";
+                    if (evt.m_effectApplyCombinedResult == null)
+                    {
+                        _dotSources.ApplyExpired(targetGuid, dotType);
+                        return;
+                    }
+
+                    float healthChange = evt.m_effectApplyCombinedResult.HealthChange;
 
                     if (healthChange < -0.01f) // DOT damage
                     {
                         float rawDotDmg = -healthChange;
                         float dotDmg = GetEffectiveDotDamage(targetGuid, rawDotDmg);
-                        float overkill = Math.Max(0f, rawDotDmg - dotDmg);
                         var targetStats = GetOrCreate(targetGuid, -1);
                         targetStats.DotDamageReceived += dotDmg;
                         targetStats.TotalDamageReceived += dotDmg;
                         targetStats.RawDamageReceived += rawDotDmg;
-                        // Exclude self-damage DOTs from damage dealt
-                        if (performerGuid != 0 && performerGuid != targetGuid)
+
+                        foreach (var share in _dotSources.GetShares(targetGuid, dotType, evt.m_effectApplyCombinedResult, rawDotDmg, dotDmg))
                         {
+                            uint performerGuid = share.SourceActorGuid;
+                            // Exclude self-damage DOTs from damage dealt
+                            if (performerGuid == 0 || performerGuid == targetGuid) continue;
                             var performerStats = GetOrCreate(performerGuid, -1);
-                            performerStats.DotDamageDealt += dotDmg;
-                            performerStats.TotalDamageDealt += dotDmg;
-                            performerStats.OverkillDamageDealt += overkill;
+                            performerStats.DotDamageDealt += share.EffectiveAmount;
+                            performerStats.TotalDamageDealt += share.EffectiveAmount;
+                            performerStats.OverkillDamageDealt += share.OverkillAmount;
                         }
+                        _dotSources.ApplyExpired(targetGuid, dotType);
                         UpdateAndMarkDirty();
                     }
                     else if (healthChange > 0.01f) // HoT heal
@@ -183,16 +208,115 @@ namespace DD2DamageMeter
                         float healAmt = healthChange;
                         var targetStats = GetOrCreate(targetGuid, -1);
                         targetStats.TotalHealingReceived += healAmt;
-                        if (performerGuid != 0)
+
+                        foreach (var share in _dotSources.GetShares(targetGuid, dotType, evt.m_effectApplyCombinedResult, healAmt, healAmt))
                         {
+                            uint performerGuid = share.SourceActorGuid;
+                            if (performerGuid == 0) continue;
                             var performerStats = GetOrCreate(performerGuid, -1);
-                            performerStats.TotalHealingDone += healAmt;
+                            performerStats.TotalHealingDone += share.EffectiveAmount;
                         }
+                        _dotSources.ApplyExpired(targetGuid, dotType);
                         UpdateAndMarkDirty();
+                    }
+                    else
+                    {
+                        _dotSources.ApplyExpired(targetGuid, dotType);
                     }
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"OnDotApplied error: {ex.Message}"); }
+        }
+
+        public void OnBuffAdded(EventBuffAdded evt)
+        {
+            try
+            {
+                lock (_lock)
+                {
+                    if (evt?.Buff == null || !IsMaledictionSource(evt.Buff.Id, evt.SourceId)) return;
+                    if (evt.PerformerActorGuid == 0 || evt.TargetActorGuid == 0 || evt.PerformerActorGuid == evt.TargetActorGuid) return;
+                    if (ResolveTeamIndex(evt.PerformerActorGuid) != 0) return;
+                    AddIndirectDotSource(evt.TargetActorGuid, evt.PerformerActorGuid);
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"OnBuffAdded error: {ex.Message}"); }
+        }
+
+        public void OnBuffRemoved(EventBuffRemoved evt)
+        {
+            try
+            {
+                lock (_lock)
+                {
+                    if (evt?.Buff == null || !IsMaledictionSource(evt.Buff.Id, evt.SourceId)) return;
+                    RemoveIndirectDotSource(evt.ActorGuid, evt.SourceActorGuid);
+                }
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning($"OnBuffRemoved error: {ex.Message}"); }
+        }
+
+        private uint ResolveIndirectDotSource(ActorInstance targetActor, string dotId, string dotType, uint currentSourceActorGuid, SourceType sourceType, string sourceId)
+        {
+            uint floorSource = _floorDotSources.ResolveDotSource(targetActor, dotId, dotType, currentSourceActorGuid, sourceType, sourceId, guid => ResolveTeamIndex(guid) == 0);
+            if (floorSource != 0) return floorSource;
+
+            uint targetGuid = targetActor != null ? targetActor.ActorGuid : 0;
+            if (!IsMaledictionDotType(dotType, dotId)) return 0;
+            if (currentSourceActorGuid != 0 && currentSourceActorGuid != targetGuid && ResolveTeamIndex(currentSourceActorGuid) == 0)
+                return 0;
+
+            if (!_maledictionSources.TryGetValue(targetGuid, out var sources) || sources.Count == 0)
+                return 0;
+
+            for (int i = sources.Count - 1; i >= 0; i--)
+            {
+                if (sources[i] != 0) return sources[i];
+            }
+            return 0;
+        }
+
+        private static bool IsMaledictionSource(string buffId, string sourceId)
+        {
+            return ContainsId(buffId, "malediction") || ContainsId(sourceId, "malediction");
+        }
+
+        private static bool IsMaledictionDotType(string dotType, string dotId)
+        {
+            return ContainsId(dotType, "bleed") ||
+                   ContainsId(dotType, "blight") ||
+                   ContainsId(dotType, "burn") ||
+                   ContainsId(dotId, "bleed") ||
+                   ContainsId(dotId, "blight") ||
+                   ContainsId(dotId, "burn");
+        }
+
+        private static bool ContainsId(string value, string needle)
+        {
+            return !string.IsNullOrEmpty(value) &&
+                   value.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private void AddIndirectDotSource(uint targetGuid, uint sourceGuid)
+        {
+            if (!_maledictionSources.TryGetValue(targetGuid, out var sources))
+            {
+                sources = new List<uint>();
+                _maledictionSources[targetGuid] = sources;
+            }
+            if (!sources.Contains(sourceGuid))
+                sources.Add(sourceGuid);
+        }
+
+        private void RemoveIndirectDotSource(uint targetGuid, uint sourceGuid)
+        {
+            if (!_maledictionSources.TryGetValue(targetGuid, out var sources)) return;
+            if (sourceGuid == 0)
+                sources.Clear();
+            else
+                sources.RemoveAll(guid => guid == sourceGuid);
+            if (sources.Count == 0)
+                _maledictionSources.Remove(targetGuid);
         }
 
         private static FieldInfo _trackerChangeAmountsField;
@@ -315,6 +439,7 @@ namespace DD2DamageMeter
             {
                 lock (_lock)
                 {
+                    _floorDotSources.OnSkillFinalizeResults(evt, guid => ResolveTeamIndex(guid) == 0);
                     uint pid = evt.PerformerGuid;
                     int pt = evt.m_PerformerTeamIndex;
                     GetOrCreate(pid, pt);
@@ -697,7 +822,9 @@ namespace DD2DamageMeter
             lock (_lock)
             {
                 _stats = new Dictionary<uint, ActorStats>();
-                _dotPerformerCache.Clear();
+                _dotSources.Reset();
+                _floorDotSources.Reset();
+                _maledictionSources.Clear();
                 _dotProjectedHp.Clear();
                 _lastKnownName.Clear();
                 _playerSnapshot = Array.Empty<ActorStats>();

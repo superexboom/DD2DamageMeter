@@ -72,16 +72,34 @@ namespace DD2DamageMeter
             {
                 if (_isRecording)
                 {
-                    _isRecording = false;
-                    Plugin.Log.LogInfo($"RunStatsTracker: Stopped recording ({_snapshots.Count} battles captured).");
+                    StopRecording();
                 }
                 else
                 {
-                    _snapshots.Clear();
-                    _battleCounter = 0;
-                    _isRecording = true;
-                    Plugin.Log.LogInfo("RunStatsTracker: Started recording.");
+                    StartRecording();
                 }
+            }
+        }
+
+        public void StartRecording()
+        {
+            lock (_lock)
+            {
+                if (_isRecording) return;
+                _snapshots.Clear();
+                _battleCounter = 0;
+                _isRecording = true;
+                Plugin.Log.LogInfo("RunStatsTracker: Started recording.");
+            }
+        }
+
+        public void StopRecording()
+        {
+            lock (_lock)
+            {
+                if (!_isRecording) return;
+                _isRecording = false;
+                Plugin.Log.LogInfo($"RunStatsTracker: Stopped recording ({_snapshots.Count} battles captured).");
             }
         }
 
