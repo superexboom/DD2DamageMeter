@@ -75,7 +75,7 @@ namespace DD2DamageMeter
             var prevMatrix = GUI.matrix;
             GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(_scaleFactor, _scaleFactor, 1f));
 
-            _rect = GUI.Window(729004, _rect, Win, "<b>Buff/Debuff Log</b>", _windowStyle);
+            _rect = GUI.Window(729004, _rect, Win, DmText.T("buffLogTitle"), _windowStyle);
             _rect = UiUtil.ClampToScreen(_rect, _scaleFactor);
 
             GUI.matrix = prevMatrix;
@@ -101,13 +101,13 @@ namespace DD2DamageMeter
                     if (entries[i] is CombatLogTracker.LogEntry) { hasStatusEntry = true; break; }
                 }
 
-                if (!hasStatusEntry) { GUILayout.Label("No buff/debuff log yet...", _nm); }
+                if (!hasStatusEntry) { GUILayout.Label(DmText.T("noStatusLog"), _nm); }
                 else
                 {
                     if (_tracker.IsStatusDirty) { _scroll.y = float.MaxValue; _tracker.ClearStatusDirty(); }
                     for (int i = 0; i < entries.Count; i++)
                     {
-                        if (entries[i] is CombatLogTracker.RoundHeader rh) GUILayout.Label($"--- Round {rh.Round} ---", _round);
+                        if (entries[i] is CombatLogTracker.RoundHeader rh) GUILayout.Label(DmText.Format("round", rh.Round), _round);
                         else if (entries[i] is CombatLogTracker.LogEntry le) DrawEntry(le);
                     }
                 }
@@ -122,7 +122,15 @@ namespace DD2DamageMeter
             var totals = _tracker.GetStatusTotalsSnapshot();
             if (!totals.HasAny) return;
             GUILayout.Label(
-                $"Hero B+{totals.PlayerBuffApplied} D+{totals.PlayerDebuffApplied} -{totals.PlayerStatusRemoved} Used {totals.PlayerStatusConsumed}   |   Enemy B+{totals.EnemyBuffApplied} D+{totals.EnemyDebuffApplied} -{totals.EnemyStatusRemoved} Used {totals.EnemyStatusConsumed}",
+                DmText.Format("statusSummary",
+                    totals.PlayerBuffApplied,
+                    totals.PlayerDebuffApplied,
+                    totals.PlayerStatusRemoved,
+                    totals.PlayerStatusConsumed,
+                    totals.EnemyBuffApplied,
+                    totals.EnemyDebuffApplied,
+                    totals.EnemyStatusRemoved,
+                    totals.EnemyStatusConsumed),
                 _summary);
         }
 
@@ -140,21 +148,22 @@ namespace DD2DamageMeter
                 GUIStyle s; string t;
                 switch (le.ActionType)
                 {
-                    case "BUFF+": s = _buff; t = "BUFF +"; break;
-                    case "BUFF-": s = _buff; t = "BUFF -"; break;
-                    case "BUFF!": s = _buff; t = "BUFF USED"; break;
-                    case "DEBUFF+": s = _debuff; t = "DEBUFF +"; break;
-                    case "DEBUFF-": s = _debuff; t = "DEBUFF -"; break;
-                    case "DEBUFF!": s = _debuff; t = "DEBUFF USED"; break;
-                    case "TOKEN+": s = _status; t = "TOKEN +"; break;
-                    case "TOKEN-": s = _status; t = "TOKEN -"; break;
-                    case "TOKEN!": s = _status; t = "TOKEN USED"; break;
-                    case "TOKEN~": s = _status; t = "SWAP"; break;
-                    case "TOKENx": s = _status; t = "NEGATE"; break;
-                    case "STATUS+": s = _status; t = "STATUS +"; break;
-                    case "STATUS-": s = _status; t = "STATUS -"; break;
-                    default: s = _nm; t = le.ActionType; break;
+                    case "BUFF+":
+                    case "BUFF-":
+                    case "BUFF!": s = _buff; break;
+                    case "DEBUFF+":
+                    case "DEBUFF-":
+                    case "DEBUFF!": s = _debuff; break;
+                    case "TOKEN+":
+                    case "TOKEN-":
+                    case "TOKEN!":
+                    case "TOKEN~":
+                    case "TOKENx":
+                    case "STATUS+":
+                    case "STATUS-": s = _status; break;
+                    default: s = _nm; break;
                 }
+                t = DmText.ActionLabel(le.ActionType, le.Value, le.DotType);
                 GUILayout.Label(t, s, GUILayout.Width(92));
                 GUILayout.Label("->", _nm, GUILayout.Width(20));
                 GUILayout.Label(le.TargetName ?? "?", le.TargetIsPlayer ? _pn : _en, GUILayout.Width(110));

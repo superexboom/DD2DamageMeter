@@ -11,6 +11,14 @@
 
   <ItemGroup>
     <Compile Remove="IronCrown\**\*.cs" />
+    <Compile Remove="DD2SteamMultiplayerDoorstop\**\*.cs" />
+    <Compile Remove="DD2SteamMultiplayerHost\**\*.cs" />
+    <Compile Remove="DD2SteamMultiplayerRuntime\**\*.cs" />
+    <Compile Remove="SteamMultiplayerPrototype\**\*.cs" />
+    <Compile Remove="DebugActorPlus\**\*.cs" />
+    <Compile Remove="ItemSpawnerPlus\**\*.cs" />
+    <Compile Remove="PartyBuilderPlus\**\*.cs" />
+    <Compile Remove="artifacts\**\*.cs" />
   </ItemGroup>
 
   <!-- BepInEx -->

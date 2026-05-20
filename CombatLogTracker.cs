@@ -176,6 +176,19 @@ namespace DD2DamageMeter
             }
         }
 
+        public List<object> GetRecentEntriesSnapshot(int maxEntries)
+        {
+            lock (_lock)
+            {
+                if (Entries.Count == 0)
+                    return new List<object>();
+
+                int take = maxEntries <= 0 ? Entries.Count : Math.Min(maxEntries, Entries.Count);
+                int start = Math.Max(0, Entries.Count - take);
+                return new List<object>(Entries.GetRange(start, Entries.Count - start));
+            }
+        }
+
         private static string ToDisplayName(string dotType)
         {
             if (string.IsNullOrEmpty(dotType)) return "DOT";

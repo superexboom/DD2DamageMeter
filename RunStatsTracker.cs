@@ -42,10 +42,13 @@ namespace DD2DamageMeter
             public float DotDamageDealt;
             public float DotDamageReceived;
             public float BonusDamageContribution;
+            public float VulnerableDamageContribution;
             public float ShieldContribution;
             public float GuardContribution;
             public int ShieldWasted;
-            public float TotalContribution => BonusDamageContribution + ShieldContribution + GuardContribution;
+            public int ComboApplied;
+            public int ComboConsumed;
+            public float TotalContribution => BonusDamageContribution + VulnerableDamageContribution + ShieldContribution + GuardContribution;
         }
 
         private readonly List<BattleSnapshot> _snapshots = new List<BattleSnapshot>();
@@ -56,12 +59,16 @@ namespace DD2DamageMeter
         public bool IsRecording => _isRecording;
         public int BattleCount => _snapshots.Count;
 
-        public int GetBattleCount(DamageTracker currentTracker = null, ContributionTracker currentContribution = null)
+        public int GetBattleCount(
+            DamageTracker currentTracker = null,
+            ContributionTracker currentContribution = null,
+            DamageMeterMpSnapshot currentRemoteSnapshot = null)
         {
             lock (_lock)
             {
                 int count = _snapshots.Count;
                 if (TryCreateCurrentSnapshot(currentTracker, currentContribution, out _)) count++;
+                if (TryCreateRemoteSnapshot(currentRemoteSnapshot, out _)) count++;
                 return count;
             }
         }
@@ -122,6 +129,25 @@ namespace DD2DamageMeter
             }
         }
 
+        public void CaptureRemoteSnapshot(DamageMeterMpSnapshot snapshot)
+        {
+            if (!_isRecording) return;
+            try
+            {
+                lock (_lock)
+                {
+                    if (!TryCreateRemoteSnapshot(snapshot, out var battleSnapshot)) return;
+                    battleSnapshot.BattleIndex = ++_battleCounter;
+                    _snapshots.Add(battleSnapshot);
+                    Plugin.Log.LogInfo($"RunStatsTracker: Captured remote battle #{battleSnapshot.BattleIndex}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"RunStatsTracker.CaptureRemoteSnapshot error: {ex.Message}");
+            }
+        }
+
         private bool TryCreateCurrentSnapshot(DamageTracker tracker, ContributionTracker contributionTracker, out BattleSnapshot snapshot)
         {
             snapshot = null;
@@ -143,6 +169,29 @@ namespace DD2DamageMeter
                 ContributionStats = contributionStats,
                 PlayerTotalDamage = tracker.PlayerTotalDamage,
                 EnemyTotalDamage = tracker.EnemyTotalDamage
+            };
+            return true;
+        }
+
+        private bool TryCreateRemoteSnapshot(DamageMeterMpSnapshot source, out BattleSnapshot snapshot)
+        {
+            snapshot = null;
+            if (!_isRecording || source == null || !source.IsAvailable) return false;
+
+            var playerStats = DeepCopyRemoteStats(source.Heroes);
+            var enemyStats = DeepCopyRemoteStats(source.Enemies);
+            var contributionStats = DeepCopyRemoteContributionStats(source.Contributions);
+            if (!HasAnyStats(playerStats) && !HasAnyStats(enemyStats) && !HasAnyContributionStats(contributionStats)) return false;
+
+            snapshot = new BattleSnapshot
+            {
+                BattleIndex = _battleCounter + 1,
+                Timestamp = DateTime.Now,
+                PlayerStats = playerStats,
+                EnemyStats = enemyStats,
+                ContributionStats = contributionStats,
+                PlayerTotalDamage = source.PlayerTotalDamage,
+                EnemyTotalDamage = source.EnemyTotalDamage
             };
             return true;
         }
@@ -182,9 +231,11 @@ namespace DD2DamageMeter
             {
                 var s = stats[i];
                 if (s.BonusDamage > 0.01f ||
+                    s.VulnerableDamage > 0.01f ||
                     s.ShieldPrevented > 0.01f ||
                     s.GuardProtected > 0.01f ||
-                    s.ShieldWasted > 0)
+                    s.ComboApplied > 0 ||
+                    s.ComboConsumed > 0)
                 {
                     return true;
                 }
@@ -237,16 +288,86 @@ namespace DD2DamageMeter
                     ActorName = s.ActorName,
                     TeamIndex = s.TeamIndex,
                     BonusDamage = s.BonusDamage,
+                    VulnerableDamage = s.VulnerableDamage,
                     ShieldPrevented = s.ShieldPrevented,
                     GuardProtected = s.GuardProtected,
-                    ShieldWasted = s.ShieldWasted
+                    ShieldWasted = s.ShieldWasted,
+                    ComboApplied = s.ComboApplied,
+                    ComboConsumed = s.ComboConsumed
                 });
             }
             return result;
         }
 
+        private static List<DamageTracker.ActorStats> DeepCopyRemoteStats(IList<DamageMeterMpActorStats> source)
+        {
+            var result = new List<DamageTracker.ActorStats>();
+            if (source == null) return result;
+            for (int i = 0; i < source.Count; i++)
+            {
+                var s = source[i];
+                if (s == null) continue;
+                result.Add(new DamageTracker.ActorStats
+                {
+                    ActorGuid = ParseGuid(s.ActorGuid),
+                    ActorName = s.ActorName,
+                    TeamIndex = s.TeamIndex,
+                    TotalDamageDealt = s.TotalDamageDealt,
+                    TotalDamageReceived = s.TotalDamageReceived,
+                    RawDamageReceived = s.RawDamageReceived,
+                    OverkillDamageDealt = s.OverkillDamageDealt,
+                    TotalHealingDone = s.TotalHealingDone,
+                    TotalHealingReceived = s.TotalHealingReceived,
+                    TotalStressReceived = s.TotalStressReceived,
+                    Kills = s.Kills,
+                    Crits = s.Crits,
+                    IncomingAttacks = s.IncomingAttacks,
+                    AvoidedAttacks = s.AvoidedAttacks,
+                    DodgeAvoids = s.DodgeAvoids,
+                    MissAvoids = s.MissAvoids,
+                    DotDamageDealt = s.DotDamageDealt,
+                    DotDamageReceived = 0f
+                });
+            }
+            return result;
+        }
+
+        private static List<ContributionTracker.ContributionStats> DeepCopyRemoteContributionStats(IList<DamageMeterMpContributionStats> source)
+        {
+            var result = new List<ContributionTracker.ContributionStats>();
+            if (source == null) return result;
+            for (int i = 0; i < source.Count; i++)
+            {
+                var s = source[i];
+                if (s == null) continue;
+                result.Add(new ContributionTracker.ContributionStats
+                {
+                    ActorGuid = ParseGuid(s.ActorGuid),
+                    ActorName = s.ActorName,
+                    TeamIndex = s.TeamIndex,
+                    BonusDamage = s.BonusDamage,
+                    VulnerableDamage = s.VulnerableDamage,
+                    ShieldPrevented = s.ShieldPrevented,
+                    GuardProtected = s.GuardProtected,
+                    ShieldWasted = s.ShieldWasted,
+                    ComboApplied = s.ComboApplied,
+                    ComboConsumed = s.ComboConsumed
+                });
+            }
+            return result;
+        }
+
+        private static uint ParseGuid(string value)
+        {
+            uint guid;
+            return uint.TryParse(value, out guid) ? guid : 0U;
+        }
+
         // Merge all snapshots into aggregated stats
-        public (List<MergedStats> players, List<MergedStats> enemies) GetMergedStats(DamageTracker currentTracker = null, ContributionTracker currentContribution = null)
+        public (List<MergedStats> players, List<MergedStats> enemies) GetMergedStats(
+            DamageTracker currentTracker = null,
+            ContributionTracker currentContribution = null,
+            DamageMeterMpSnapshot currentRemoteSnapshot = null)
         {
             lock (_lock)
             {
@@ -265,6 +386,12 @@ namespace DD2DamageMeter
                     MergeTeam(currentSnapshot.EnemyStats, enemyMap);
                     MergeContributionTeam(currentSnapshot.ContributionStats, playerMap);
                 }
+                if (TryCreateRemoteSnapshot(currentRemoteSnapshot, out var currentRemote))
+                {
+                    MergeTeam(currentRemote.PlayerStats, playerMap);
+                    MergeTeam(currentRemote.EnemyStats, enemyMap);
+                    MergeContributionTeam(currentRemote.ContributionStats, playerMap);
+                }
 
                 var players = new List<MergedStats>(playerMap.Values);
                 var enemies = new List<MergedStats>(enemyMap.Values);
@@ -274,11 +401,16 @@ namespace DD2DamageMeter
             }
         }
 
-        private List<BattleSnapshot> GetSnapshotsForRead(DamageTracker currentTracker, ContributionTracker currentContribution)
+        private List<BattleSnapshot> GetSnapshotsForRead(
+            DamageTracker currentTracker,
+            ContributionTracker currentContribution,
+            DamageMeterMpSnapshot currentRemoteSnapshot)
         {
             var snapshots = new List<BattleSnapshot>(_snapshots);
             if (TryCreateCurrentSnapshot(currentTracker, currentContribution, out var currentSnapshot))
                 snapshots.Add(currentSnapshot);
+            if (TryCreateRemoteSnapshot(currentRemoteSnapshot, out var currentRemote))
+                snapshots.Add(currentRemote);
             return snapshots;
         }
 
@@ -322,7 +454,15 @@ namespace DD2DamageMeter
             if (stats == null) return;
             foreach (var s in stats)
             {
-                if (s.BonusDamage <= 0.01f && s.ShieldPrevented <= 0.01f && s.GuardProtected <= 0.01f && s.ShieldWasted <= 0) continue;
+                if (s.BonusDamage <= 0.01f &&
+                    s.VulnerableDamage <= 0.01f &&
+                    s.ShieldPrevented <= 0.01f &&
+                    s.GuardProtected <= 0.01f &&
+                    s.ComboApplied <= 0 &&
+                    s.ComboConsumed <= 0)
+                {
+                    continue;
+                }
                 string key = s.ActorName ?? $"#{s.ActorGuid}";
                 if (!map.TryGetValue(key, out var merged))
                 {
@@ -336,13 +476,47 @@ namespace DD2DamageMeter
                     map[key] = merged;
                 }
                 merged.BonusDamageContribution += s.BonusDamage;
+                merged.VulnerableDamageContribution += s.VulnerableDamage;
                 merged.ShieldContribution += s.ShieldPrevented;
                 merged.GuardContribution += s.GuardProtected;
-                merged.ShieldWasted += s.ShieldWasted;
+                merged.ComboApplied += s.ComboApplied;
+                merged.ComboConsumed += s.ComboConsumed;
             }
         }
 
-        public void ExportCsv(string filePath, DamageTracker currentTracker = null, ContributionTracker currentContribution = null)
+        private static int GetComboAppliedForActor(List<ContributionTracker.ContributionStats> stats, DamageTracker.ActorStats actor)
+        {
+            if (stats == null || actor == null) return 0;
+            for (int i = 0; i < stats.Count; i++)
+            {
+                ContributionTracker.ContributionStats row = stats[i];
+                if (row == null) continue;
+                if (row.ActorGuid == actor.ActorGuid)
+                {
+                    return row.ComboApplied;
+                }
+            }
+
+            for (int i = 0; i < stats.Count; i++)
+            {
+                ContributionTracker.ContributionStats row = stats[i];
+                if (row == null) continue;
+                if (!string.IsNullOrEmpty(row.ActorName) &&
+                    !string.IsNullOrEmpty(actor.ActorName) &&
+                    string.Equals(row.ActorName, actor.ActorName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return row.ComboApplied;
+                }
+            }
+
+            return 0;
+        }
+
+        public void ExportCsv(
+            string filePath,
+            DamageTracker currentTracker = null,
+            ContributionTracker currentContribution = null,
+            DamageMeterMpSnapshot currentRemoteSnapshot = null)
         {
             try
             {
@@ -351,7 +525,7 @@ namespace DD2DamageMeter
                 List<MergedStats> enemies;
                 lock (_lock)
                 {
-                    snapshots = GetSnapshotsForRead(currentTracker, currentContribution);
+                    snapshots = GetSnapshotsForRead(currentTracker, currentContribution, currentRemoteSnapshot);
 
                     var playerMap = new Dictionary<string, MergedStats>();
                     var enemyMap = new Dictionary<string, MergedStats>();
@@ -371,70 +545,91 @@ namespace DD2DamageMeter
                 using (var writer = new StreamWriter(filePath, false, Encoding.UTF8))
                 {
                     // Header
-                    writer.WriteLine("=== Run Stats CSV Export ===");
-                    writer.WriteLine($"Battles Recorded: {snapshots.Count}");
-                    writer.WriteLine($"Exported: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                    writer.WriteLine(DmText.T("csvTitle"));
+                    writer.WriteLine(DmText.Format("battlesRecorded", snapshots.Count));
+                    writer.WriteLine(DmText.Format("exported", DateTime.Now));
                     writer.WriteLine();
 
                     // Heroes
-                    writer.WriteLine("--- Heroes ---");
-                    writer.WriteLine("Name,Battles,TotalDMG,DOT_DMG,OVK_DMG,RawDMG_Taken,ActualDMG_Taken,HealingDone,HealingReceived,Stress,Kills,Crits,AvoidRate,AvoidChecks,AvoidedAttacks,DodgeAvoids,MissAvoids");
+                    writer.WriteLine(DmText.T("sectionHeroes"));
+                    writer.WriteLine(DmText.T("csvHeroesHeader"));
                     foreach (var s in players)
                     {
-                        writer.WriteLine($"\"{s.ActorName}\",{s.BattlesSeen},{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.TotalStressReceived:F1},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids}");
+                        writer.WriteLine($"\"{s.ActorName}\",{s.BattlesSeen},{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.TotalStressReceived:F1},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids},{s.ComboApplied}");
                     }
                     writer.WriteLine();
 
                     // Enemies
-                    writer.WriteLine("--- Enemies ---");
-                    writer.WriteLine("Name,Battles,TotalDMG,DOT_DMG,OVK_DMG,RawDMG_Taken,ActualDMG_Taken,HealingDone,HealingReceived,Stress,Kills,Crits,AvoidRate,AvoidChecks,AvoidedAttacks,DodgeAvoids,MissAvoids");
+                    writer.WriteLine(DmText.T("sectionEnemies"));
+                    writer.WriteLine(DmText.T("csvHeroesHeader"));
                     foreach (var s in enemies)
                     {
-                        writer.WriteLine($"\"{s.ActorName}\",{s.BattlesSeen},{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.TotalStressReceived:F1},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids}");
+                        writer.WriteLine($"\"{s.ActorName}\",{s.BattlesSeen},{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.TotalStressReceived:F1},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids},{s.ComboApplied}");
                     }
                     writer.WriteLine();
 
                     // Contribution
-                    writer.WriteLine("--- Contribution ---");
-                    writer.WriteLine("Name,TotalContribution,BonusDamage,ShieldPrevented,GuardProtected,ShieldWasted,ContributionPct");
+                    writer.WriteLine(DmText.T("contribution"));
+                    writer.WriteLine(DmText.T("csvContributionHeader"));
                     var contributionRows = new List<MergedStats>(players);
-                    contributionRows.Sort((a, b) => b.TotalContribution.CompareTo(a.TotalContribution));
+                    contributionRows.Sort((a, b) =>
+                    {
+                        int result = b.TotalContribution.CompareTo(a.TotalContribution);
+                        if (result != 0) return result;
+                        result = b.VulnerableDamageContribution.CompareTo(a.VulnerableDamageContribution);
+                        if (result != 0) return result;
+                        result = b.ComboConsumed.CompareTo(a.ComboConsumed);
+                        if (result != 0) return result;
+                        return string.Compare(a.ActorName, b.ActorName, StringComparison.CurrentCultureIgnoreCase);
+                    });
                     float totalContribution = 0f;
                     foreach (var s in contributionRows) totalContribution += s.TotalContribution;
                     foreach (var s in contributionRows)
                     {
-                        if (s.TotalContribution <= 0.01f && s.ShieldWasted <= 0) continue;
+                        if (s.TotalContribution <= 0.01f && s.ComboConsumed <= 0) continue;
                         float pct = totalContribution > 0f ? s.TotalContribution / totalContribution * 100f : 0f;
-                        writer.WriteLine($"\"{s.ActorName}\",{s.TotalContribution:F1},{s.BonusDamageContribution:F1},{s.ShieldContribution:F1},{s.GuardContribution:F1},{s.ShieldWasted},{pct:F1}");
+                        writer.WriteLine($"\"{s.ActorName}\",{s.TotalContribution:F1},{s.BonusDamageContribution:F1},{s.VulnerableDamageContribution:F1},{s.ShieldContribution:F1},{s.GuardContribution:F1},{s.ComboConsumed},{pct:F1}");
                     }
                     writer.WriteLine();
 
                     // Per-battle breakdown
-                    writer.WriteLine("--- Per Battle Breakdown ---");
+                    writer.WriteLine(DmText.T("csvPerBattle"));
                     foreach (var snap in snapshots)
                     {
-                        writer.WriteLine($"Battle #{snap.BattleIndex} ({snap.Timestamp:HH:mm:ss})");
-                        writer.WriteLine("Team,Name,DMG,DOT_DMG,OVK_DMG,RawDMG_Taken,ActualDMG_Taken,HealingDone,HealingReceived,Kills,Crits,AvoidRate,AvoidChecks,AvoidedAttacks,DodgeAvoids,MissAvoids");
+                        writer.WriteLine(DmText.Format("csvBattle", snap.BattleIndex, snap.Timestamp));
+                        writer.WriteLine(DmText.T("csvTeamHeader"));
                         if (snap.PlayerStats != null)
                         {
                             foreach (var s in snap.PlayerStats)
-                                writer.WriteLine($"Hero,\"{s.ActorName}\",{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids}");
+                                writer.WriteLine($"{DmText.T("csvHero")},\"{s.ActorName}\",{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids},{GetComboAppliedForActor(snap.ContributionStats, s)}");
                         }
                         if (snap.EnemyStats != null)
                         {
                             foreach (var s in snap.EnemyStats)
-                                writer.WriteLine($"Enemy,\"{s.ActorName}\",{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids}");
+                                writer.WriteLine($"{DmText.T("csvEnemy")},\"{s.ActorName}\",{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids},0");
                         }
                         if (snap.ContributionStats != null && HasAnyContributionStats(snap.ContributionStats))
                         {
-                            writer.WriteLine("Contribution");
-                            writer.WriteLine("Name,TotalContribution,BonusDamage,ShieldPrevented,GuardProtected,ShieldWasted");
+                            writer.WriteLine(DmText.T("contribution"));
+                            writer.WriteLine(DmText.T("csvContributionHeader"));
                             var rows = new List<ContributionTracker.ContributionStats>(snap.ContributionStats);
-                            rows.Sort((a, b) => b.TotalContribution.CompareTo(a.TotalContribution));
+                            rows.Sort((a, b) =>
+                            {
+                                int result = b.TotalContribution.CompareTo(a.TotalContribution);
+                                if (result != 0) return result;
+                                result = b.VulnerableDamage.CompareTo(a.VulnerableDamage);
+                                if (result != 0) return result;
+                                result = b.ComboConsumed.CompareTo(a.ComboConsumed);
+                                if (result != 0) return result;
+                                return string.Compare(a.ActorName, b.ActorName, StringComparison.CurrentCultureIgnoreCase);
+                            });
+                            float battleContribution = 0f;
+                            foreach (var row in rows) battleContribution += row.TotalContribution;
                             foreach (var s in rows)
                             {
-                                if (s.TotalContribution <= 0.01f && s.ShieldWasted <= 0) continue;
-                                writer.WriteLine($"\"{s.ActorName}\",{s.TotalContribution:F1},{s.BonusDamage:F1},{s.ShieldPrevented:F1},{s.GuardProtected:F1},{s.ShieldWasted}");
+                                if (s.TotalContribution <= 0.01f && s.ComboConsumed <= 0) continue;
+                                float pct = battleContribution > 0f ? s.TotalContribution / battleContribution * 100f : 0f;
+                                writer.WriteLine($"\"{s.ActorName}\",{s.TotalContribution:F1},{s.BonusDamage:F1},{s.VulnerableDamage:F1},{s.ShieldPrevented:F1},{s.GuardProtected:F1},{s.ComboConsumed},{pct:F1}");
                             }
                         }
                         writer.WriteLine();

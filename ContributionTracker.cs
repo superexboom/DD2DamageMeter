@@ -27,15 +27,19 @@ namespace DD2DamageMeter
             public string ActorName;
             public int TeamIndex;
             public float BonusDamage;
+            public float VulnerableDamage;
             public float ShieldPrevented;
             public float GuardProtected;
             public int ShieldWasted;
-            public float TotalContribution => BonusDamage + ShieldPrevented + GuardProtected;
+            public int ComboApplied;
+            public int ComboConsumed;
+            public float TotalContribution => BonusDamage + VulnerableDamage + ShieldPrevented + GuardProtected;
         }
 
         private enum ContributionKind
         {
             DamageBonus,
+            Vulnerable,
             Shield,
             Guard
         }
@@ -75,6 +79,22 @@ namespace DD2DamageMeter
             public int Count;
         }
 
+        private class ActiveCombo
+        {
+            public uint TargetGuid;
+            public uint ProviderGuid;
+            public string SourceId;
+            public int Round;
+        }
+
+        private class PendingComboConsume
+        {
+            public uint TargetGuid;
+            public uint ConsumerGuid;
+            public string SkillId;
+            public int Round;
+        }
+
         private class FloorSource
         {
             public uint TargetGuid;
@@ -107,6 +127,7 @@ namespace DD2DamageMeter
         private readonly Dictionary<uint, ContributionStats> _stats = new Dictionary<uint, ContributionStats>();
         private readonly List<ActiveEffect> _activeEffects = new List<ActiveEffect>();
         private readonly Dictionary<uint, List<ActiveEffect>> _pendingDamageEffects = new Dictionary<uint, List<ActiveEffect>>();
+        private readonly Dictionary<uint, List<ActiveEffect>> _pendingVulnerableEffects = new Dictionary<uint, List<ActiveEffect>>();
         private readonly Dictionary<uint, List<ActiveEffect>> _pendingShieldEffects = new Dictionary<uint, List<ActiveEffect>>();
         private readonly Dictionary<uint, List<ActiveEffect>> _pendingGuardEffects = new Dictionary<uint, List<ActiveEffect>>();
         private readonly List<GuardedDot> _pendingGuardedDots = new List<GuardedDot>();
@@ -115,6 +136,8 @@ namespace DD2DamageMeter
         private readonly Dictionary<uint, ProjectedHealth> _dotProjectedHp = new Dictionary<uint, ProjectedHealth>();
         private readonly List<StatusSourceHint> _statusHints = new List<StatusSourceHint>();
         private readonly List<FloorSource> _floorSources = new List<FloorSource>();
+        private readonly Dictionary<uint, ActiveCombo> _activeCombos = new Dictionary<uint, ActiveCombo>();
+        private readonly List<PendingComboConsume> _pendingComboConsumes = new List<PendingComboConsume>();
 
         private ContributionStats[] _playerSnapshot = Array.Empty<ContributionStats>();
         private bool _snapshotDirty = true;
@@ -148,6 +171,7 @@ namespace DD2DamageMeter
                         if (ar == null) continue;
                         CacheStatusHints(ar, evt.SkillId ?? "");
                     }
+                    CacheComboConsumptionHints(evt);
                     RecordFloorContributionSources(evt);
 
                     var projectedHp = new Dictionary<uint, float>();
@@ -163,6 +187,7 @@ namespace DD2DamageMeter
                         if (ar.IsDamaging)
                         {
                             TrackDamageBonusContribution(ar, hpBefore);
+                            TrackVulnerableContribution(ar, hpBefore);
                             float effectiveDamage = Mathf.Min(ar.HealthDamage, Mathf.Max(0f, hpBefore));
                             projectedHp[ar.m_TargetActorGuid] = Mathf.Max(0f, hpBefore - effectiveDamage);
                         }
@@ -175,8 +200,8 @@ namespace DD2DamageMeter
                         TrackGuardedDotApplications(ar);
                     }
 
-                    FlushUnusedPendingShieldsAsWaste();
                     _pendingDamageEffects.Clear();
+                    _pendingVulnerableEffects.Clear();
                     _pendingShieldEffects.Clear();
                     _pendingGuardEffects.Clear();
                 }
@@ -276,6 +301,8 @@ namespace DD2DamageMeter
                 {
                     var token = GetTokenDefinition(evt.m_TokenId);
                     if (token == null) return;
+                    TrackComboAdded(evt, token);
+                    TrackVulnerableAdded(evt, token);
 
                     float bonusPct = GetDamageBonusPct(token);
                     bool isDamageBonus = bonusPct > 0.0001f || IsDamageBonusToken(token);
@@ -335,7 +362,16 @@ namespace DD2DamageMeter
                 lock (_lock)
                 {
                     var token = GetTokenDefinition(evt.m_TokenId);
-                    if (token == null || !IsPlayerTeam(evt.m_ActorGuid)) return;
+                    if (token == null) return;
+
+                    if (IsVulnerableToken(token) && !IsPlayerTeam(evt.m_ActorGuid))
+                    {
+                        var effect = PopActiveEffect(evt.m_ActorGuid, evt.m_TokenId, ContributionKind.Vulnerable);
+                        if (effect != null) AddPending(_pendingVulnerableEffects, evt.m_ActorGuid, effect);
+                        return;
+                    }
+
+                    if (!IsPlayerTeam(evt.m_ActorGuid)) return;
 
                     if (IsDamageBonusToken(token) || GetDamageBonusPct(token) > 0.0001f)
                     {
@@ -370,6 +406,16 @@ namespace DD2DamageMeter
                 {
                     if (evt.Actor == null || evt.Token == null) return;
                     uint targetGuid = evt.Actor.ActorGuid;
+                    if (IsComboToken(evt.Token))
+                    {
+                        TrackComboRemoved(evt);
+                        if (!IsPlayerTeam(targetGuid)) return;
+                    }
+                    if (IsVulnerableToken(evt.Token))
+                    {
+                        TrackVulnerableRemoved(evt);
+                        if (!IsPlayerTeam(targetGuid)) return;
+                    }
                     if (!IsPlayerTeam(targetGuid)) return;
 
                     bool combatRemoval = IsSourceType(evt.Source, "combat");
@@ -392,7 +438,7 @@ namespace DD2DamageMeter
                         }
                         else if (!shieldEffect.Used)
                         {
-                            CountShieldWaste(shieldEffect);
+                            shieldEffect.Used = true;
                         }
                     }
 
@@ -485,7 +531,7 @@ namespace DD2DamageMeter
                         if (transferRemoval)
                             AddPending(_pendingShieldEffects, evt.ActorGuid, shieldEffect);
                         else if (!shieldEffect.Used)
-                            CountShieldWaste(shieldEffect);
+                            shieldEffect.Used = true;
                     }
                 }
             }
@@ -503,7 +549,7 @@ namespace DD2DamageMeter
                 var players = new List<ContributionStats>();
                 foreach (var kvp in _stats)
                     players.Add(Clone(kvp.Value));
-                players.Sort((a, b) => b.TotalContribution.CompareTo(a.TotalContribution));
+                players.Sort(CompareContributionRows);
                 _playerSnapshot = players.ToArray();
                 _snapshotDirty = false;
             }
@@ -516,6 +562,7 @@ namespace DD2DamageMeter
                 _stats.Clear();
                 _activeEffects.Clear();
                 _pendingDamageEffects.Clear();
+                _pendingVulnerableEffects.Clear();
                 _pendingShieldEffects.Clear();
                 _pendingGuardEffects.Clear();
                 _pendingGuardedDots.Clear();
@@ -524,6 +571,8 @@ namespace DD2DamageMeter
                 _dotProjectedHp.Clear();
                 _statusHints.Clear();
                 _floorSources.Clear();
+                _activeCombos.Clear();
+                _pendingComboConsumes.Clear();
                 _playerSnapshot = Array.Empty<ContributionStats>();
                 _snapshotDirty = true;
                 _currentRound = 0;
@@ -566,6 +615,32 @@ namespace DD2DamageMeter
             _snapshotDirty = true;
         }
 
+        private void TrackVulnerableContribution(Assets.Code.Skill.SkillCalculation.ActorResult ar, float hpBefore)
+        {
+            uint performerGuid = ar.m_PerformerActorGuid;
+            uint targetGuid = ar.m_TargetActorGuid;
+            if (performerGuid == 0 || targetGuid == 0 || performerGuid == targetGuid) return;
+            if (!IsPlayerTeam(performerGuid) || IsPlayerTeam(targetGuid)) return;
+
+            var effects = GetVulnerableEffectsForTarget(targetGuid);
+            if (effects.Count == 0) return;
+
+            float effectiveDamage = Mathf.Min(Mathf.Max(0f, ar.HealthDamage), Mathf.Max(0f, hpBefore));
+            float contribution = effectiveDamage / 3f;
+            if (contribution <= 0.0001f) return;
+
+            float share = contribution / effects.Count;
+            for (int i = 0; i < effects.Count; i++)
+            {
+                var effect = effects[i];
+                if (effect == null || effect.ProviderGuid == 0 || !IsPlayerTeam(effect.ProviderGuid)) continue;
+                var stats = GetOrCreate(effect.ProviderGuid);
+                stats.VulnerableDamage += share;
+                effect.Used = true;
+            }
+            _snapshotDirty = true;
+        }
+
         private void CacheFinalConsumedDamageEffects(EventSkillFinalizeResults evt)
         {
             var skillResult = GetSkillResult(evt);
@@ -573,7 +648,6 @@ namespace DD2DamageMeter
 
             foreach (uint actorGuid in skillResult.GetTokensToRemoveActorGuids())
             {
-                if (!IsPlayerTeam(actorGuid)) continue;
                 var tokenInstances = skillResult.GetTokensToRemoveTokenInstances(actorGuid);
                 if (tokenInstances == null) continue;
 
@@ -581,6 +655,24 @@ namespace DD2DamageMeter
                 {
                     var token = tokenInstance?.Definition;
                     if (token == null) continue;
+                    if (IsVulnerableToken(token))
+                    {
+                        if (!IsPlayerTeam(actorGuid) && IsPlayerTeam(tokenInstance.SourceActorGuid))
+                        {
+                            AddPendingUnique(_pendingVulnerableEffects, actorGuid, new ActiveEffect
+                            {
+                                TargetGuid = actorGuid,
+                                ProviderGuid = tokenInstance.SourceActorGuid,
+                                EffectId = token.Id ?? "",
+                                SourceId = tokenInstance.SourceId ?? "",
+                                Kind = ContributionKind.Vulnerable,
+                                IsBuff = false
+                            });
+                        }
+                        continue;
+                    }
+
+                    if (!IsPlayerTeam(actorGuid)) continue;
                     float bonusPct = GetDamageBonusPct(token);
                     if (bonusPct <= 0.0001f) continue;
                     if (!IsDamageBonusToken(token) && bonusPct <= 0.0001f) continue;
@@ -641,7 +733,7 @@ namespace DD2DamageMeter
             if (prevented <= 0.0001f)
             {
                 for (int i = 0; i < effects.Count; i++)
-                    CountShieldWaste(effects[i]);
+                    effects[i].Used = true;
                 return;
             }
 
@@ -995,19 +1087,6 @@ namespace DD2DamageMeter
             _dotSourceIdsField = changeAmountType.GetField("m_SourceIds", BindingFlags.Public | BindingFlags.Instance);
         }
 
-        private void FlushUnusedPendingShieldsAsWaste()
-        {
-            foreach (var kvp in _pendingShieldEffects)
-            {
-                var effects = kvp.Value;
-                for (int i = 0; i < effects.Count; i++)
-                {
-                    if (!effects[i].Used)
-                        CountShieldWaste(effects[i]);
-                }
-            }
-        }
-
         private List<ActiveEffect> GetDamageEffectsForActor(uint actorGuid)
         {
             var result = new List<ActiveEffect>();
@@ -1019,6 +1098,25 @@ namespace DD2DamageMeter
             }
             if (_pendingDamageEffects.TryGetValue(actorGuid, out var pending))
                 result.AddRange(pending);
+            return result;
+        }
+
+        private List<ActiveEffect> GetVulnerableEffectsForTarget(uint actorGuid)
+        {
+            var result = new List<ActiveEffect>();
+            if (_pendingVulnerableEffects.TryGetValue(actorGuid, out var pending))
+                result.AddRange(pending);
+            if (result.Count > 0) return result;
+
+            for (int i = 0; i < _activeEffects.Count; i++)
+            {
+                var effect = _activeEffects[i];
+                if (effect.TargetGuid == actorGuid && effect.Kind == ContributionKind.Vulnerable)
+                {
+                    result.Add(effect);
+                    break;
+                }
+            }
             return result;
         }
 
@@ -1235,15 +1333,6 @@ namespace DD2DamageMeter
             return string.Equals(existing.SourceId ?? "", candidate.SourceId ?? "", StringComparison.OrdinalIgnoreCase);
         }
 
-        private void CountShieldWaste(ActiveEffect effect)
-        {
-            if (effect == null || effect.Used) return;
-            var stats = GetOrCreate(effect.ProviderGuid);
-            stats.ShieldWasted++;
-            effect.Used = true;
-            _snapshotDirty = true;
-        }
-
         private ContributionStats GetOrCreate(uint guid)
         {
             if (_stats.TryGetValue(guid, out var existing))
@@ -1275,10 +1364,228 @@ namespace DD2DamageMeter
                 ActorName = s.ActorName,
                 TeamIndex = s.TeamIndex,
                 BonusDamage = s.BonusDamage,
+                VulnerableDamage = s.VulnerableDamage,
                 ShieldPrevented = s.ShieldPrevented,
                 GuardProtected = s.GuardProtected,
-                ShieldWasted = s.ShieldWasted
+                ShieldWasted = s.ShieldWasted,
+                ComboApplied = s.ComboApplied,
+                ComboConsumed = s.ComboConsumed
             };
+        }
+
+        private static int CompareContributionRows(ContributionStats a, ContributionStats b)
+        {
+            int result = b.TotalContribution.CompareTo(a.TotalContribution);
+            if (result != 0) return result;
+            result = b.VulnerableDamage.CompareTo(a.VulnerableDamage);
+            if (result != 0) return result;
+            result = b.ComboConsumed.CompareTo(a.ComboConsumed);
+            if (result != 0) return result;
+            result = b.ComboApplied.CompareTo(a.ComboApplied);
+            if (result != 0) return result;
+            return string.Compare(a.ActorName, b.ActorName, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private void CacheComboConsumptionHints(EventSkillFinalizeResults evt)
+        {
+            try
+            {
+                if (evt?.ActorResults == null) return;
+                string skillId = evt.SkillId ?? "";
+                foreach (var ar in evt.ActorResults)
+                {
+                    if (ar == null || !ar.IsCombo) continue;
+
+                    uint consumerGuid = ar.m_PerformerActorGuid;
+                    uint targetGuid = ar.m_TargetActorGuid;
+                    if (consumerGuid == 0 || targetGuid == 0) continue;
+                    if (!IsPlayerTeam(consumerGuid) || IsPlayerTeam(targetGuid)) continue;
+                    if (!_activeCombos.ContainsKey(targetGuid)) continue;
+
+                    AddPendingComboConsume(targetGuid, consumerGuid, skillId);
+                }
+            }
+            catch { }
+        }
+
+        private void AddPendingComboConsume(uint targetGuid, uint consumerGuid, string skillId)
+        {
+            for (int i = 0; i < _pendingComboConsumes.Count; i++)
+            {
+                var pending = _pendingComboConsumes[i];
+                if (pending.TargetGuid == targetGuid && pending.ConsumerGuid == consumerGuid)
+                {
+                    pending.SkillId = skillId ?? "";
+                    pending.Round = _currentRound;
+                    return;
+                }
+            }
+
+            _pendingComboConsumes.Add(new PendingComboConsume
+            {
+                TargetGuid = targetGuid,
+                ConsumerGuid = consumerGuid,
+                SkillId = skillId ?? "",
+                Round = _currentRound
+            });
+        }
+
+        private PendingComboConsume ConsumePendingComboConsume(uint targetGuid, uint consumerGuid, string sourceId)
+        {
+            PendingComboConsume wildcard = null;
+            for (int i = _pendingComboConsumes.Count - 1; i >= 0; i--)
+            {
+                var pending = _pendingComboConsumes[i];
+                if (_currentRound - pending.Round > 1)
+                {
+                    _pendingComboConsumes.RemoveAt(i);
+                    continue;
+                }
+
+                if (pending.TargetGuid != targetGuid) continue;
+                if (consumerGuid != 0 && pending.ConsumerGuid != 0 && pending.ConsumerGuid != consumerGuid) continue;
+                if (!SourceIdMatches(pending.SkillId, sourceId))
+                {
+                    if (wildcard == null)
+                        wildcard = pending;
+                    continue;
+                }
+
+                _pendingComboConsumes.RemoveAt(i);
+                return pending;
+            }
+
+            if (wildcard != null)
+                _pendingComboConsumes.Remove(wildcard);
+            return wildcard;
+        }
+
+        private void TrackVulnerableAdded(EventTokenAdded evt, TokenDefinition token)
+        {
+            if (!IsVulnerableToken(token)) return;
+
+            uint targetGuid = evt.m_ActorGuid;
+            if (targetGuid == 0 || IsPlayerTeam(targetGuid)) return;
+
+            uint sourceGuid = 0;
+            string sourceId = evt.m_SourceId ?? "";
+            var hint = ConsumeStatusHint(targetGuid, evt.m_TokenId, "ADD", evt.m_SourceId);
+            if (hint != null && IsSkillSource(hint.SourceType, hint.SourceId))
+            {
+                sourceGuid = hint.SourceGuid;
+                sourceId = hint.SourceId ?? sourceId;
+            }
+
+            if (sourceGuid == 0 &&
+                IsSkillSource(evt.m_SourceType, evt.m_SourceId) &&
+                TryResolveTokenSource(targetGuid, evt.m_TokenId, evt.m_SourceType, evt.m_SourceId, out var resolvedGuid, out var resolvedSourceId))
+            {
+                sourceGuid = resolvedGuid;
+                sourceId = resolvedSourceId ?? sourceId;
+            }
+
+            if (sourceGuid == 0 || !IsPlayerTeam(sourceGuid)) return;
+
+            int amount = Math.Max(1, evt.m_AddAmount);
+            for (int i = 0; i < amount; i++)
+                AddActiveEffect(targetGuid, sourceGuid, evt.m_TokenId, sourceId, ContributionKind.Vulnerable, 0f, false);
+        }
+
+        private void TrackVulnerableRemoved(EventTokenRemoved evt)
+        {
+            uint targetGuid = evt.Actor != null ? evt.Actor.ActorGuid : 0;
+            if (targetGuid == 0) return;
+
+            var removed = PopActiveEffect(targetGuid, evt.Token.Id, ContributionKind.Vulnerable);
+            if (IsPlayerTeam(targetGuid)) return;
+
+            // Re-applying Vulnerable can remove one instance after the token limit is
+            // enforced. If a Vulnerable token still remains, keep attribution aligned
+            // with the surviving token instance instead of dropping the contribution.
+            if (TryResolveTokenSource(targetGuid, evt.Token.Id, evt.Source, evt.SourceId, out var sourceGuid, out var sourceId) &&
+                sourceGuid != 0 &&
+                IsPlayerTeam(sourceGuid))
+            {
+                AddActiveEffect(targetGuid, sourceGuid, evt.Token.Id, sourceId, ContributionKind.Vulnerable, 0f, false);
+            }
+            else if (removed != null)
+            {
+                _snapshotDirty = true;
+            }
+        }
+
+        private void TrackComboAdded(EventTokenAdded evt, TokenDefinition token)
+        {
+            if (!IsComboToken(token)) return;
+
+            uint targetGuid = evt.m_ActorGuid;
+            if (targetGuid == 0 || IsPlayerTeam(targetGuid)) return;
+
+            uint sourceGuid = 0;
+            string sourceId = evt.m_SourceId ?? "";
+            var hint = ConsumeStatusHint(targetGuid, evt.m_TokenId, "ADD", evt.m_SourceId);
+            if (hint != null && IsSkillSource(hint.SourceType, hint.SourceId))
+            {
+                sourceGuid = hint.SourceGuid;
+                sourceId = hint.SourceId ?? sourceId;
+            }
+
+            if (sourceGuid == 0 &&
+                IsSkillSource(evt.m_SourceType, evt.m_SourceId) &&
+                TryResolveTokenSource(targetGuid, evt.m_TokenId, evt.m_SourceType, evt.m_SourceId, out var resolvedGuid, out var resolvedSourceId))
+            {
+                sourceGuid = resolvedGuid;
+                sourceId = resolvedSourceId ?? sourceId;
+            }
+
+            if (sourceGuid == 0 || !IsPlayerTeam(sourceGuid)) return;
+
+            int amount = Math.Max(1, evt.m_AddAmount);
+            var stats = GetOrCreate(sourceGuid);
+            stats.ComboApplied += amount;
+            _activeCombos[targetGuid] = new ActiveCombo
+            {
+                TargetGuid = targetGuid,
+                ProviderGuid = sourceGuid,
+                SourceId = sourceId ?? "",
+                Round = _currentRound
+            };
+            _snapshotDirty = true;
+        }
+
+        private void TrackComboRemoved(EventTokenRemoved evt)
+        {
+            uint targetGuid = evt.Actor != null ? evt.Actor.ActorGuid : 0;
+            if (targetGuid == 0) return;
+
+            if (IsPlayerTeam(targetGuid))
+            {
+                _activeCombos.Remove(targetGuid);
+                return;
+            }
+
+            bool consumerIsPlayer = evt.SourceActorGuid != 0 && IsPlayerTeam(evt.SourceActorGuid);
+            var pending = consumerIsPlayer
+                ? ConsumePendingComboConsume(targetGuid, evt.SourceActorGuid, evt.SourceId)
+                : null;
+
+            if (pending != null && _activeCombos.TryGetValue(targetGuid, out var combo) && combo.ProviderGuid != 0 && IsPlayerTeam(combo.ProviderGuid))
+            {
+                var stats = GetOrCreate(combo.ProviderGuid);
+                stats.ComboConsumed++;
+                _activeCombos.Remove(targetGuid);
+                _snapshotDirty = true;
+                return;
+            }
+
+            // Re-applying combo over an existing combo removes the old token before the
+            // replacement is kept, but it is not an effective combo for our stats.
+            // Keep the original owner in that case so a later real combo consume still
+            // credits the first effective application.
+            if (!IsSkillSource(evt.Source, evt.SourceId) || !consumerIsPlayer)
+            {
+                _activeCombos.Remove(targetGuid);
+            }
         }
 
         private void CacheStatusHints(Assets.Code.Skill.SkillCalculation.ActorResult ar, string fallbackSkillId)
@@ -1983,6 +2290,18 @@ namespace DD2DamageMeter
                 return SingletonMonoBehaviour<Library<string, TokenDefinition>>.Instance?.GetLibraryElement(tokenId);
             }
             catch { return null; }
+        }
+
+        private static bool IsComboToken(TokenDefinition token)
+        {
+            return token != null &&
+                   string.Equals(token.Id ?? "", "combo", StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool IsVulnerableToken(TokenDefinition token)
+        {
+            return token != null &&
+                   string.Equals(token.Id ?? "", "vulnerable", StringComparison.OrdinalIgnoreCase);
         }
 
         private static bool TryResolveTokenSource(uint actorGuid, string tokenId, SourceType sourceType, string eventSourceId, out uint sourceActorGuid, out string sourceId)

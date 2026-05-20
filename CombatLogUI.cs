@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using UnityEngine;
 
 namespace DD2DamageMeter
@@ -21,6 +22,8 @@ namespace DD2DamageMeter
         // Scale
         private float _scaleFactor = 1f;
         private int _lastScreenHeight;
+        private bool _remoteMode;
+        private DamageMeterMpSnapshot _remoteSnapshot;
 
         public bool IsVisible { get; set; }
         public Action OnToggleStatusLog;
@@ -82,11 +85,13 @@ namespace DD2DamageMeter
         {
             Init();
             UpdateScaleFactor();
+            _remoteMode = DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out _remoteSnapshot);
 
             var prevMatrix = GUI.matrix;
             GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(_scaleFactor, _scaleFactor, 1f));
 
-            _rect = GUI.Window(729002, _rect, Win, "<b>Battle Log</b>", _windowStyle);
+            string title = _remoteMode ? $"{DmText.T("battleLogTitle")}  [{DmText.T("remoteHost")}]" : DmText.T("battleLogTitle");
+            _rect = GUI.Window(729002, _rect, Win, title, _windowStyle);
             _rect = UiUtil.ClampToScreen(_rect, _scaleFactor);
 
             GUI.matrix = prevMatrix;
@@ -104,31 +109,82 @@ namespace DD2DamageMeter
         {
             GUILayout.BeginHorizontal();
             {
-                Color prev = GUI.backgroundColor;
-                GUI.backgroundColor = new Color(0.35f, 0.8f, 0.85f);
-                if (GUILayout.Button("Buff/Debuff", _buttonStyle, GUILayout.Width(110))) OnToggleStatusLog?.Invoke();
-                GUI.backgroundColor = prev;
+                if (_remoteMode)
+                {
+                    GUILayout.Label(DmText.T("remoteCombatLog"), _nm);
+                }
+                else
+                {
+                    Color prev = GUI.backgroundColor;
+                    GUI.backgroundColor = new Color(0.35f, 0.8f, 0.85f);
+                    if (GUILayout.Button(DmText.T("buffDebuff"), _buttonStyle, GUILayout.Width(110))) OnToggleStatusLog?.Invoke();
+                    GUI.backgroundColor = prev;
+                }
                 GUILayout.FlexibleSpace();
             }
             GUILayout.EndHorizontal();
 
             _scroll = GUILayout.BeginScrollView(_scroll, GUILayout.Height(_h - 52f));
             {
-                var entries = _tracker.Entries;
-                if (entries.Count == 0) { GUILayout.Label("No combat log yet...", _nm); }
+                if (_remoteMode)
+                {
+                    DrawRemoteEntries();
+                }
                 else
                 {
-                    if (_tracker.IsDirty) { _scroll.y = float.MaxValue; _tracker.ClearDirty(); }
-                    for (int i = 0; i < entries.Count; i++)
+                    var entries = _tracker.Entries;
+                    if (entries.Count == 0) { GUILayout.Label(DmText.T("noCombatLog"), _nm); }
+                    else
                     {
-                        if (entries[i] is CombatLogTracker.RoundHeader rh) GUILayout.Label($"--- Round {rh.Round} ---", _round);
-                        else if (entries[i] is CombatLogTracker.LogEntry le) DrawEntry(le);
+                        if (_tracker.IsDirty) { _scroll.y = float.MaxValue; _tracker.ClearDirty(); }
+                        for (int i = 0; i < entries.Count; i++)
+                        {
+                            if (entries[i] is CombatLogTracker.RoundHeader rh) GUILayout.Label(DmText.Format("round", rh.Round), _round);
+                            else if (entries[i] is CombatLogTracker.LogEntry le) DrawEntry(le);
+                        }
                     }
                 }
             }
             GUILayout.EndScrollView();
             GUI.Label(new Rect(_w - RH - 2, _h - RH - 2, RH, RH), "\u255a", _resizeStyle);
             GUI.DragWindow(new Rect(0, 0, _w, _h - RH));
+        }
+
+        private void DrawRemoteEntries()
+        {
+            if (_remoteSnapshot == null)
+            {
+                GUILayout.Label(DmText.T("noRemoteSnapshot"), _nm);
+                return;
+            }
+
+            if (!_remoteSnapshot.IsAvailable)
+            {
+                GUILayout.Label(DmText.Format("remoteUnavailable", _remoteSnapshot.UnavailableReason ?? DmText.T("unknown")), _nm);
+                return;
+            }
+
+            IList<DamageMeterMpCombatLogEntry> entries = _remoteSnapshot.CombatLogEntries;
+            if (entries == null || entries.Count == 0)
+            {
+                GUILayout.Label(DmText.T("noRemoteCombatLog"), _nm);
+                return;
+            }
+
+            _scroll.y = float.MaxValue;
+            for (int i = 0; i < entries.Count; i++)
+            {
+                DamageMeterMpCombatLogEntry entry = entries[i];
+                if (entry == null) continue;
+                if (string.Equals(entry.EntryType, "round", StringComparison.OrdinalIgnoreCase))
+                {
+                    GUILayout.Label(DmText.Format("round", entry.Round), _round);
+                }
+                else
+                {
+                    DrawRemoteEntry(entry);
+                }
+            }
         }
 
         private void DrawEntry(CombatLogTracker.LogEntry le)
@@ -145,30 +201,68 @@ namespace DD2DamageMeter
                 GUIStyle s; string t;
                 switch (le.ActionType)
                 {
-                    case "CRIT": s = _crit; t = $"CRIT {le.Value:F0}"; break;
-                    case "DMG": s = _dmg; t = $"-{le.Value:F0}"; break;
-                    case "HEAL": s = _heal; t = $"+{le.Value:F0}"; break;
-                    case "DOT": s = _dot; t = $"DOT {le.Value:F0}"; 
-                        if (!string.IsNullOrEmpty(le.DotType)) t = $"{le.DotType} {le.Value:F0}"; 
-                        break;
-                    case "KILL": s = _death; t = "KILL"; break;
-                    case "DEATH": s = _death; t = "DEATH"; break;
-                    case "STRESS": s = _stress; t = $"STRESS {le.Value:F1}"; break;
-                    case "BUFF+": s = _buff; t = "BUFF +"; break;
-                    case "BUFF-": s = _buff; t = "BUFF -"; break;
-                    case "BUFF!": s = _buff; t = "BUFF USED"; break;
-                    case "DEBUFF+": s = _debuff; t = "DEBUFF +"; break;
-                    case "DEBUFF-": s = _debuff; t = "DEBUFF -"; break;
-                    case "DEBUFF!": s = _debuff; t = "DEBUFF USED"; break;
-                    case "TOKEN+": s = _status; t = "TOKEN +"; break;
-                    case "TOKEN-": s = _status; t = "TOKEN -"; break;
-                    case "TOKEN!": s = _status; t = "TOKEN USED"; break;
-                    case "TOKEN~": s = _status; t = "SWAP"; break;
-                    case "TOKENx": s = _status; t = "NEGATE"; break;
-                    case "STATUS+": s = _status; t = "STATUS +"; break;
-                    case "STATUS-": s = _status; t = "STATUS -"; break;
-                    default: s = _nm; t = le.ActionType; break;
+                    case "CRIT": s = _crit; break;
+                    case "DMG": s = _dmg; break;
+                    case "HEAL": s = _heal; break;
+                    case "DOT": s = _dot; break;
+                    case "KILL":
+                    case "DEATH": s = _death; break;
+                    case "STRESS": s = _stress; break;
+                    case "BUFF+":
+                    case "BUFF-":
+                    case "BUFF!": s = _buff; break;
+                    case "DEBUFF+":
+                    case "DEBUFF-":
+                    case "DEBUFF!": s = _debuff; break;
+                    case "TOKEN+":
+                    case "TOKEN-":
+                    case "TOKEN!":
+                    case "TOKEN~":
+                    case "TOKENx":
+                    case "STATUS+":
+                    case "STATUS-": s = _status; break;
+                    default: s = _nm; break;
                 }
+                t = DmText.ActionLabel(le.ActionType, le.Value, le.DotType);
+                GUILayout.Label(t, s, GUILayout.Width(92));
+                GUILayout.Label("->", _nm, GUILayout.Width(20));
+                GUILayout.Label(le.TargetName ?? "?", le.TargetIsPlayer ? _pn : _en, GUILayout.Width(110));
+
+                string info = le.Extra ?? "";
+                if (!string.IsNullOrEmpty(le.SkillId))
+                {
+                    string sk = le.SkillId; if (sk.Length > 20) sk = sk.Substring(0, 18) + "..";
+                    info = sk + " " + info;
+                }
+                if (!string.IsNullOrEmpty(info)) GUILayout.Label(info.Trim(), _nm);
+            }
+            GUILayout.EndHorizontal();
+        }
+
+        private void DrawRemoteEntry(DamageMeterMpCombatLogEntry le)
+        {
+            GUILayout.BeginHorizontal();
+            {
+                if (!string.IsNullOrEmpty(le.SourceName))
+                {
+                    if (le.SourceName.StartsWith("[")) GUILayout.Label(le.SourceName, _dot, GUILayout.Width(70));
+                    else GUILayout.Label(le.SourceName, le.SourceIsPlayer ? _pn : _en, GUILayout.Width(110));
+                }
+                else GUILayout.Space(110);
+
+                GUIStyle s; string t;
+                switch (le.ActionType)
+                {
+                    case "CRIT": s = _crit; break;
+                    case "DMG": s = _dmg; break;
+                    case "HEAL": s = _heal; break;
+                    case "DOT": s = _dot; break;
+                    case "KILL":
+                    case "DEATH": s = _death; break;
+                    case "STRESS": s = _stress; break;
+                    default: s = _nm; break;
+                }
+                t = DmText.ActionLabel(le.ActionType, le.Value, le.DotType);
                 GUILayout.Label(t, s, GUILayout.Width(92));
                 GUILayout.Label("->", _nm, GUILayout.Width(20));
                 GUILayout.Label(le.TargetName ?? "?", le.TargetIsPlayer ? _pn : _en, GUILayout.Width(110));

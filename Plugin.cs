@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using BepInEx;
 using BepInEx.Configuration;
 using BepInEx.Logging;
@@ -12,9 +13,13 @@ namespace DD2DamageMeter
     {
         private const string PluginGuid = "com.dd2.damagemeter";
         private const string PluginName = "DD2 Damage Meter";
-        private const string PluginVersion = "1.3.0";
+        private const string PluginVersion = "1.4.2";
 
         internal static ManualLogSource Log;
+        internal static Plugin Instance { get; private set; }
+
+        internal static string Version => PluginVersion;
+
         private Harmony _harmony;
         private DamageTracker _tracker;
         private DamageMeterUI _ui;
@@ -26,20 +31,32 @@ namespace DD2DamageMeter
         private ContributionTracker _contributionTracker;
         private ConfigEntry<bool> _autoStartRecording;
         private ConfigEntry<string> _exportDirectory;
+        private ConfigEntry<string> _language;
         private bool _eventManagerReady;
         private float _checkTimer;
         private bool _battleActive;
         private bool _overlayHidden;
         private bool _autoStartPending;
+        private bool _remoteBattleActive;
+        private DamageMeterMpSnapshot _lastRemoteBattleSnapshot;
+        private string _lastRemoteCapturedDigest;
 
         private void Awake()
         {
+            Instance = this;
             Log = Logger;
-            Log.LogInfo($"{PluginName} v{PluginVersion} loading...");
             DontDestroyOnLoad(gameObject);
             gameObject.hideFlags = HideFlags.HideAndDontSave;
 
             Config.SaveOnConfigSet = true;
+            _language = Config.Bind(
+                "UI",
+                "Language",
+                "auto",
+                "UI/export language: auto, en, or zh."
+            );
+            DmText.SetLanguage(_language.Value);
+            Log.LogInfo(DmText.Format("pluginLoading", PluginVersion));
             _autoStartRecording = Config.Bind(
                 "Run",
                 "AutoStartRecording",
@@ -53,7 +70,7 @@ namespace DD2DamageMeter
                 "Folder for exported TXT/CSV files. Empty uses the loaded plugin DLL folder."
             );
             _autoStartPending = _autoStartRecording.Value;
-            Log.LogInfo($"Settings loaded: AutoStartRecording={_autoStartRecording.Value}, ExportDirectory='{_exportDirectory.Value}'");
+            Log.LogInfo(DmText.Format("settingsLoaded", _autoStartRecording.Value, _exportDirectory.Value, _language.Value));
 
             _contributionTracker = new ContributionTracker();
             _tracker = new DamageTracker();
@@ -70,13 +87,31 @@ namespace DD2DamageMeter
             _logUi.OnToggleStatusLog = () => { _statusLogUi.IsVisible = !_statusLogUi.IsVisible; };
             _ui.OnToggleRecording = () =>
             {
-                if (_runTracker.IsRecording) _runTracker.CaptureBattle(_tracker, _contributionTracker);
+                bool wasRecording = _runTracker.IsRecording;
+                if (wasRecording)
+                {
+                    if (!CaptureLatestRemoteBattle())
+                    {
+                        _runTracker.CaptureBattle(_tracker, _contributionTracker);
+                    }
+                }
+                else
+                {
+                    _remoteBattleActive = false;
+                    _lastRemoteBattleSnapshot = null;
+                    _lastRemoteCapturedDigest = null;
+                }
                 _runTracker.ToggleRecording();
             };
             _ui.OnShowRunStats = () => { _runUi.IsVisible = !_runUi.IsVisible; };
             _ui.OnExportCsv = () => { ExportRunCsv(); };
             _ui.IsRecording = () => _runTracker.IsRecording;
-            _ui.BattleCount = () => _runTracker.GetBattleCount(_tracker, _contributionTracker);
+            _ui.BattleCount = () =>
+            {
+                DamageMeterMpSnapshot remote;
+                bool remoteMode = DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out remote);
+                return _runTracker.GetBattleCount(remoteMode ? null : _tracker, remoteMode ? null : _contributionTracker, remoteMode ? remote : null);
+            };
             _ui.IsAutoRecordingEnabled = () => _autoStartRecording.Value;
             _ui.OnAutoRecordingChanged = enabled =>
             {
@@ -103,15 +138,34 @@ namespace DD2DamageMeter
                     Log.LogWarning($"Export directory saved, but could not be prepared: {ex.Message}");
                 }
             };
+            _ui.GetLanguage = () => DmText.LanguageDisplay();
+            _ui.OnLanguageChanged = language =>
+            {
+                _language.Value = language ?? "auto";
+                DmText.SetLanguage(_language.Value);
+                Config.Save();
+                Log.LogInfo(DmText.Format("languageChanged", DmText.LanguageDisplay()));
+            };
 
             _harmony = new Harmony(PluginGuid);
             _harmony.PatchAll(typeof(Plugin).Assembly);
             Log.LogInfo($"{PluginName} loaded. Waiting for EventManager...");
         }
 
+        internal bool IsEventManagerReady => _eventManagerReady;
+
+        internal bool IsBattleActive => _battleActive;
+
+        internal DamageTracker Tracker => _tracker;
+
+        internal ContributionTracker ContributionTracker => _contributionTracker;
+
+        internal CombatLogTracker LogTracker => _logTracker;
+
         private void Update()
         {
             HandleHotkeys();
+            TrackRemoteDamageMeterRecording();
 
             if (!_eventManagerReady)
             {
@@ -138,6 +192,9 @@ namespace DD2DamageMeter
                 return;
             }
 
+            _remoteBattleActive = false;
+            _lastRemoteBattleSnapshot = null;
+            _lastRemoteCapturedDigest = null;
             _runTracker.StartRecording();
             Log.LogInfo($"Auto start recording applied ({reason}).");
         }
@@ -227,9 +284,167 @@ namespace DD2DamageMeter
             _contributionTracker.OnBattleBegin(evt);
         }
 
+        private void TrackRemoteDamageMeterRecording()
+        {
+            if (!_runTracker.IsRecording)
+            {
+                _remoteBattleActive = false;
+                _lastRemoteBattleSnapshot = null;
+                return;
+            }
+
+            DamageMeterMpSnapshot snapshot;
+            if (!DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out snapshot) || snapshot == null || !snapshot.IsAvailable)
+            {
+                if (_remoteBattleActive)
+                {
+                    CaptureLatestRemoteBattle();
+                    _remoteBattleActive = false;
+                }
+                return;
+            }
+
+            bool active = IsRemoteCombatActive(snapshot);
+            if (active)
+            {
+                if (_remoteBattleActive && IsLikelyNewRemoteBattle(_lastRemoteBattleSnapshot, snapshot))
+                {
+                    CaptureLatestRemoteBattle();
+                }
+
+                _remoteBattleActive = true;
+                _lastRemoteBattleSnapshot = snapshot;
+                return;
+            }
+
+            if (_remoteBattleActive)
+            {
+                CaptureLatestRemoteBattle();
+                _remoteBattleActive = false;
+                _lastRemoteBattleSnapshot = null;
+            }
+        }
+
+        private bool CaptureLatestRemoteBattle()
+        {
+            DamageMeterMpSnapshot snapshot = _lastRemoteBattleSnapshot;
+            DamageMeterMpSnapshot current;
+            if (DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out current) && current != null && current.IsAvailable && HasRemoteStats(current))
+            {
+                snapshot = current;
+            }
+
+            if (snapshot == null || !snapshot.IsAvailable || !HasRemoteStats(snapshot))
+            {
+                return false;
+            }
+
+            string digest = snapshot.Digest ?? "";
+            if (!string.IsNullOrEmpty(digest) && string.Equals(_lastRemoteCapturedDigest, digest, StringComparison.Ordinal))
+            {
+                return true;
+            }
+
+            _runTracker.CaptureRemoteSnapshot(snapshot);
+            _lastRemoteCapturedDigest = digest;
+            return true;
+        }
+
+        private static bool IsRemoteCombatActive(DamageMeterMpSnapshot snapshot)
+        {
+            if (snapshot == null || !snapshot.IsAvailable || !HasRemoteStats(snapshot))
+            {
+                return false;
+            }
+
+            string state = (snapshot.BattleState ?? "").Trim().ToLowerInvariant();
+            if (state == "inactive" || state == "[none]" || state == "none")
+            {
+                return false;
+            }
+
+            return snapshot.IsActive || snapshot.Round > 0 || snapshot.Turn > 0;
+        }
+
+        private static bool IsLikelyNewRemoteBattle(DamageMeterMpSnapshot previous, DamageMeterMpSnapshot current)
+        {
+            if (previous == null || current == null || !HasRemoteStats(previous) || !HasRemoteStats(current))
+            {
+                return false;
+            }
+
+            float previousTotal = previous.PlayerTotalDamage + previous.EnemyTotalDamage;
+            float currentTotal = current.PlayerTotalDamage + current.EnemyTotalDamage;
+            if (previousTotal > 1f && currentTotal + 1f < previousTotal * 0.5f)
+            {
+                return true;
+            }
+
+            return previous.Round > 1 && current.Round <= 1 && current.Turn <= 1 &&
+                !string.Equals(previous.Digest, current.Digest, StringComparison.Ordinal);
+        }
+
+        private static bool HasRemoteStats(DamageMeterMpSnapshot snapshot)
+        {
+            if (snapshot == null)
+            {
+                return false;
+            }
+
+            return HasAnyRemoteRows(snapshot.Heroes) || HasAnyRemoteRows(snapshot.Enemies) || HasAnyRemoteContribution(snapshot.Contributions);
+        }
+
+        private static bool HasAnyRemoteRows(System.Collections.Generic.IList<DamageMeterMpActorStats> rows)
+        {
+            if (rows == null) return false;
+            for (int i = 0; i < rows.Count; i++)
+            {
+                DamageMeterMpActorStats s = rows[i];
+                if (s == null) continue;
+                if (s.TotalDamageDealt > 0.01f ||
+                    s.DotDamageDealt > 0.01f ||
+                    s.TotalDamageReceived > 0.01f ||
+                    s.RawDamageReceived > 0.01f ||
+                    s.OverkillDamageDealt > 0.01f ||
+                    s.TotalHealingDone > 0.01f ||
+                    s.TotalHealingReceived > 0.01f ||
+                    s.TotalStressReceived > 0.01f ||
+                    s.Kills > 0 ||
+                    s.Crits > 0 ||
+                    s.IncomingAttacks > 0 ||
+                    s.AvoidedAttacks > 0 ||
+                    s.DodgeAvoids > 0 ||
+                    s.MissAvoids > 0)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool HasAnyRemoteContribution(System.Collections.Generic.IList<DamageMeterMpContributionStats> rows)
+        {
+            if (rows == null) return false;
+            for (int i = 0; i < rows.Count; i++)
+            {
+                DamageMeterMpContributionStats s = rows[i];
+                if (s == null) continue;
+                if (s.BonusDamage > 0.01f ||
+                    s.VulnerableDamage > 0.01f ||
+                    s.ShieldPrevented > 0.01f ||
+                    s.GuardProtected > 0.01f ||
+                    s.ComboApplied > 0 ||
+                    s.ComboConsumed > 0)
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         private void OnGUI()
         {
-            if (!_eventManagerReady) return;
+            if (!_eventManagerReady && !DamageMeterMultiplayerApi.HasRecentRemoteSnapshot()) return;
             if (_overlayHidden) return;
             if (_ui.IsVisible) _ui.Draw();
             if (_logUi.IsVisible) _logUi.Draw();
@@ -248,17 +463,18 @@ namespace DD2DamageMeter
 
                 using (var writer = new System.IO.StreamWriter(path, false, System.Text.Encoding.UTF8))
                 {
-                    writer.WriteLine("=== DD2 Damage Meter Report ===");
-                    writer.WriteLine($"Generated: {System.DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                    var contributionStats = _contributionTracker.PlayerStats;
+                    writer.WriteLine(DmText.T("reportTitle"));
+                    writer.WriteLine(DmText.Format("generated", System.DateTime.Now));
                     writer.WriteLine();
 
                     // Heroes section
                     var playerStats = _tracker.PlayerStats;
                     float playerTotal = _tracker.PlayerTotalDamage;
-                    writer.WriteLine("--- Heroes ---");
-                    writer.WriteLine($"Total Damage: {playerTotal:F0}");
-                    writer.WriteLine($"{"Name",-22} {"DMG",8} {"(DOT)",7} {"OVK",7} {"RawTkn",10} {"Heal+",7} {"HealIn",7} {"Kills",6} {"Crits",6} {"Avoid%",7} {"%DMG",6}");
-                    writer.WriteLine(new string('-', 101));
+                    writer.WriteLine(DmText.T("sectionHeroes"));
+                    writer.WriteLine(DmText.Format("totalDamage", playerTotal));
+                    writer.WriteLine($"{DmText.T("name"),-22} {DmText.T("dmg"),8} {"(DOT)",7} {DmText.T("ovk"),7} {DmText.T("rawTkn"),10} {DmText.T("healOut"),7} {DmText.T("healIn"),7} {DmText.T("kills"),6} {DmText.T("crits"),6} {DmText.T("avoidPct"),7} {DmText.T("comboApplied"),8} {"%DMG",6}");
+                    writer.WriteLine(new string('-', 110));
                     if (playerStats != null)
                     {
                         foreach (var s in playerStats)
@@ -268,7 +484,8 @@ namespace DD2DamageMeter
                             string ovkStr = s.OverkillDamageDealt > 0.5f ? $"{s.OverkillDamageDealt:F0}" : "-";
                             string takenStr = UiUtil.FormatDamageTaken(s.RawDamageReceived, s.TotalDamageReceived);
                             string avoidStr = UiUtil.FormatAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks);
-                            writer.WriteLine($"{s.ActorName,-22} {s.TotalDamageDealt,8:F0} {dotStr,7} {ovkStr,7} {takenStr,10} {s.TotalHealingDone,7:F0} {s.TotalHealingReceived,7:F0} {s.Kills,6} {s.Crits,6} {avoidStr,7} {pct,5:F1}%");
+                            int comboApplied = GetComboAppliedForActor(contributionStats, s);
+                            writer.WriteLine($"{s.ActorName,-22} {s.TotalDamageDealt,8:F0} {dotStr,7} {ovkStr,7} {takenStr,10} {s.TotalHealingDone,7:F0} {s.TotalHealingReceived,7:F0} {s.Kills,6} {s.Crits,6} {avoidStr,7} {comboApplied,8} {pct,5:F1}%");
                         }
                     }
                     writer.WriteLine();
@@ -276,9 +493,9 @@ namespace DD2DamageMeter
                     // Enemies section
                     var enemyStats = _tracker.EnemyStats;
                     float enemyTotal = _tracker.EnemyTotalDamage;
-                    writer.WriteLine("--- Enemies ---");
-                    writer.WriteLine($"Total Damage: {enemyTotal:F0}");
-                    writer.WriteLine($"{"Name",-22} {"DMG",8} {"(DOT)",7} {"OVK",7} {"RawTkn",10} {"Heal+",7} {"HealIn",7} {"Kills",6} {"Crits",6} {"Avoid%",7} {"%DMG",6}");
+                    writer.WriteLine(DmText.T("sectionEnemies"));
+                    writer.WriteLine(DmText.Format("totalDamage", enemyTotal));
+                    writer.WriteLine($"{DmText.T("name"),-22} {DmText.T("dmg"),8} {"(DOT)",7} {DmText.T("ovk"),7} {DmText.T("rawTkn"),10} {DmText.T("healOut"),7} {DmText.T("healIn"),7} {DmText.T("kills"),6} {DmText.T("crits"),6} {DmText.T("avoidPct"),7} {"%DMG",6}");
                     writer.WriteLine(new string('-', 101));
                     if (enemyStats != null)
                     {
@@ -294,7 +511,6 @@ namespace DD2DamageMeter
                     }
                     writer.WriteLine();
 
-                    var contributionStats = _contributionTracker.PlayerStats;
                     bool hasContribution = false;
                     float totalContribution = 0f;
                     if (contributionStats != null)
@@ -302,69 +518,42 @@ namespace DD2DamageMeter
                         foreach (var s in contributionStats)
                         {
                             totalContribution += s.TotalContribution;
-                            if (s.TotalContribution > 0.01f || s.ShieldWasted > 0)
+                            if (s.TotalContribution > 0.01f || s.ComboConsumed > 0)
                                 hasContribution = true;
                         }
                     }
-                    writer.WriteLine("--- Contribution ---");
-                    writer.WriteLine($"{"Name",-22} {"Contrib",8} {"Dmg+",8} {"Shield",8} {"Guard",8} {"Waste",6} {"%",6}");
-                    writer.WriteLine(new string('-', 73));
+                    writer.WriteLine(DmText.T("contribution"));
+                    writer.WriteLine($"{DmText.T("name"),-22} {DmText.T("contrib"),8} {DmText.T("dmgPlus"),8} {DmText.T("vulnerable"),8} {DmText.T("shield"),8} {DmText.T("guard"),8} {DmText.T("comboConsumed"),8} {DmText.T("pct"),6}");
+                    writer.WriteLine(new string('-', 82));
                     if (hasContribution)
                     {
                         foreach (var s in contributionStats)
                         {
-                            if (s.TotalContribution <= 0.01f && s.ShieldWasted <= 0) continue;
+                            if (s.TotalContribution <= 0.01f && s.ComboConsumed <= 0) continue;
                             float pct = totalContribution > 0 ? s.TotalContribution / totalContribution * 100f : 0f;
-                            writer.WriteLine($"{s.ActorName,-22} {s.TotalContribution,8:F1} {s.BonusDamage,8:F1} {s.ShieldPrevented,8:F1} {s.GuardProtected,8:F1} {s.ShieldWasted,6} {pct,5:F1}%");
+                            writer.WriteLine($"{s.ActorName,-22} {s.TotalContribution,8:F1} {s.BonusDamage,8:F1} {s.VulnerableDamage,8:F1} {s.ShieldPrevented,8:F1} {s.GuardProtected,8:F1} {s.ComboConsumed,8} {pct,5:F1}%");
                         }
                     }
                     else
                     {
-                        writer.WriteLine("No contribution recorded.");
+                        writer.WriteLine(DmText.T("noContribution"));
                     }
                     writer.WriteLine();
 
                     // Combat log section
-                    writer.WriteLine("--- Battle Log ---");
+                    writer.WriteLine(DmText.T("sectionBattleLog"));
                     var entries = _logTracker.Entries;
                     foreach (var entry in entries)
                     {
                         if (entry is CombatLogTracker.RoundHeader rh)
                         {
-                            writer.WriteLine($"--- Round {rh.Round} ---");
+                            writer.WriteLine(DmText.Format("round", rh.Round));
                         }
                         else if (entry is CombatLogTracker.LogEntry le)
                         {
                             string src = string.IsNullOrEmpty(le.SourceName) ? "" : le.SourceName;
                             string tgt = le.TargetName ?? "?";
-                            string action;
-                            switch (le.ActionType)
-                            {
-                                case "DMG": action = $"-{le.Value:F0}"; break;
-                                case "CRIT": action = $"CRIT {le.Value:F0}"; break;
-                                case "HEAL": action = $"+{le.Value:F0}"; break;
-                                case "DOT":
-                                    string dotName = string.IsNullOrEmpty(le.DotType) ? "DOT" : le.DotType;
-                                    action = $"{dotName} {le.Value:F0}";
-                                    break;
-                                case "KILL": action = "KILL"; break;
-                                case "DEATH": action = "DEATH"; break;
-                                case "STRESS": action = $"STRESS {le.Value:F1}"; break;
-                                case "BUFF+": action = "BUFF +"; break;
-                                case "BUFF-": action = "BUFF -"; break;
-                                case "BUFF!": action = "BUFF USED"; break;
-                                case "DEBUFF+": action = "DEBUFF +"; break;
-                                case "DEBUFF-": action = "DEBUFF -"; break;
-                                case "DEBUFF!": action = "DEBUFF USED"; break;
-                                case "TOKEN+": action = "TOKEN +"; break;
-                                case "TOKEN-": action = "TOKEN -"; break;
-                                case "TOKEN!": action = "TOKEN USED"; break;
-                                case "TOKEN~": action = "SWAP"; break;
-                                case "TOKENx": action = "NEGATE"; break;
-                                case "STATUS+": action = "STATUS +"; break;
-                                case "STATUS-": action = "STATUS -"; break;
-                                default: action = le.ActionType; break;
-                            }
+                            string action = DmText.ActionLabel(le.ActionType, le.Value, le.DotType);
                             string extra = !string.IsNullOrEmpty(le.Extra) ? $" {le.Extra}" : "";
                             string skill = !string.IsNullOrEmpty(le.SkillId) ? $" [{le.SkillId}]" : "";
                             writer.WriteLine($"  {src,-22} {action,-16} -> {tgt,-22}{skill}{extra}");
@@ -377,40 +566,30 @@ namespace DD2DamageMeter
                         writer.WriteLine();
                         if (statusTotals.HasAny)
                         {
-                            writer.WriteLine("--- Buff/Debuff Summary ---");
-                            writer.WriteLine($"Heroes: Buff+ {statusTotals.PlayerBuffApplied}, Debuff+ {statusTotals.PlayerDebuffApplied}, Removed {statusTotals.PlayerStatusRemoved}, Used {statusTotals.PlayerStatusConsumed}");
-                            writer.WriteLine($"Enemies: Buff+ {statusTotals.EnemyBuffApplied}, Debuff+ {statusTotals.EnemyDebuffApplied}, Removed {statusTotals.EnemyStatusRemoved}, Used {statusTotals.EnemyStatusConsumed}");
+                            writer.WriteLine(DmText.T("sectionStatusSummary"));
+                            writer.WriteLine(DmText.Format("statusSummary",
+                                statusTotals.PlayerBuffApplied,
+                                statusTotals.PlayerDebuffApplied,
+                                statusTotals.PlayerStatusRemoved,
+                                statusTotals.PlayerStatusConsumed,
+                                statusTotals.EnemyBuffApplied,
+                                statusTotals.EnemyDebuffApplied,
+                                statusTotals.EnemyStatusRemoved,
+                                statusTotals.EnemyStatusConsumed));
                             writer.WriteLine();
                         }
-                        writer.WriteLine("--- Buff/Debuff Log ---");
+                        writer.WriteLine(DmText.T("sectionStatusLog"));
                         foreach (var entry in _logTracker.StatusEntries)
                         {
                             if (entry is CombatLogTracker.RoundHeader rh)
                             {
-                                writer.WriteLine($"--- Round {rh.Round} ---");
+                                writer.WriteLine(DmText.Format("round", rh.Round));
                             }
                             else if (entry is CombatLogTracker.LogEntry le)
                             {
                                 string src = string.IsNullOrEmpty(le.SourceName) ? "" : le.SourceName;
                                 string tgt = le.TargetName ?? "?";
-                                string action;
-                                switch (le.ActionType)
-                                {
-                                    case "BUFF+": action = "BUFF +"; break;
-                                    case "BUFF-": action = "BUFF -"; break;
-                                    case "BUFF!": action = "BUFF USED"; break;
-                                    case "DEBUFF+": action = "DEBUFF +"; break;
-                                    case "DEBUFF-": action = "DEBUFF -"; break;
-                                    case "DEBUFF!": action = "DEBUFF USED"; break;
-                                    case "TOKEN+": action = "TOKEN +"; break;
-                                    case "TOKEN-": action = "TOKEN -"; break;
-                                    case "TOKEN!": action = "TOKEN USED"; break;
-                                    case "TOKEN~": action = "SWAP"; break;
-                                    case "TOKENx": action = "NEGATE"; break;
-                                    case "STATUS+": action = "STATUS +"; break;
-                                    case "STATUS-": action = "STATUS -"; break;
-                                    default: action = le.ActionType; break;
-                                }
+                                string action = DmText.ActionLabel(le.ActionType, le.Value, le.DotType);
                                 string extra = !string.IsNullOrEmpty(le.Extra) ? $" {le.Extra}" : "";
                                 string skill = !string.IsNullOrEmpty(le.SkillId) ? $" [{le.SkillId}]" : "";
                                 writer.WriteLine($"  {src,-22} {action,-16} -> {tgt,-22}{skill}{extra}");
@@ -427,11 +606,41 @@ namespace DD2DamageMeter
             }
         }
 
+        private static int GetComboAppliedForActor(IReadOnlyList<ContributionTracker.ContributionStats> stats, DamageTracker.ActorStats actor)
+        {
+            if (stats == null || actor == null) return 0;
+            for (int i = 0; i < stats.Count; i++)
+            {
+                ContributionTracker.ContributionStats row = stats[i];
+                if (row == null) continue;
+                if (row.ActorGuid == actor.ActorGuid)
+                {
+                    return row.ComboApplied;
+                }
+            }
+
+            for (int i = 0; i < stats.Count; i++)
+            {
+                ContributionTracker.ContributionStats row = stats[i];
+                if (row == null) continue;
+                if (!string.IsNullOrEmpty(row.ActorName) &&
+                    !string.IsNullOrEmpty(actor.ActorName) &&
+                    string.Equals(row.ActorName, actor.ActorName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return row.ComboApplied;
+                }
+            }
+
+            return 0;
+        }
+
         private void ExportRunCsv()
         {
             try
             {
-                int battleCount = _runTracker.GetBattleCount(_tracker, _contributionTracker);
+                DamageMeterMpSnapshot remote;
+                bool remoteMode = DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out remote);
+                int battleCount = _runTracker.GetBattleCount(remoteMode ? null : _tracker, remoteMode ? null : _contributionTracker, remoteMode ? remote : null);
                 if (battleCount == 0)
                 {
                     Log.LogInfo("No run data to export.");
@@ -439,7 +648,7 @@ namespace DD2DamageMeter
                 }
                 string timestamp = System.DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string path = System.IO.Path.Combine(GetExportDirectory(), $"DD2_Run_{timestamp}.csv");
-                _runTracker.ExportCsv(path, _tracker, _contributionTracker);
+                _runTracker.ExportCsv(path, remoteMode ? null : _tracker, remoteMode ? null : _contributionTracker, remoteMode ? remote : null);
                 Log.LogInfo($"Run CSV exported to: {path}");
             }
             catch (Exception ex)
@@ -469,11 +678,18 @@ namespace DD2DamageMeter
         private void OnDestroy()
         {
             // Capture last battle if recording
-            if (_battleActive && _runTracker.IsRecording)
+            if (_runTracker.IsRecording)
             {
-                _runTracker.CaptureBattle(_tracker, _contributionTracker);
+                if (!CaptureLatestRemoteBattle() && _battleActive)
+                {
+                    _runTracker.CaptureBattle(_tracker, _contributionTracker);
+                }
             }
             _harmony?.UnpatchSelf();
+            if (ReferenceEquals(Instance, this))
+            {
+                Instance = null;
+            }
             Log.LogInfo($"{PluginName} unloaded.");
         }
     }

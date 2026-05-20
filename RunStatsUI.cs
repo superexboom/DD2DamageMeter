@@ -35,17 +35,17 @@ namespace DD2DamageMeter
         private const float COL_KILLS = 40f;
         private const float COL_CRITS = 40f;
         private const float COL_AVOID = 62f;
+        private const float COL_COMBO_APPLIED = 54f;
         private const float COL_PCT = 42f;
         private const float COL_CONTRIB = 68f;
         private const float COL_BONUS = 64f;
+        private const float COL_VULN = 58f;
         private const float COL_SHIELD = 64f;
         private const float COL_GUARD = 58f;
-        private const float COL_WASTE = 44f;
         private const float COL_CONTRIB_PCT = 46f;
 
-        private static readonly string[] HeaderNames = { "Name", "Bat", "DMG", "DOT", "OVK", "RawTkn", "Heal+", "HealIn", "Kills", "Crits", "Avoid%", "%" };
-        private static readonly float[] FixedWidths = { 0f, COL_BATTLES, COL_DMG, COL_DOT, COL_OVK, COL_TAKEN, COL_HEAL_OUT, COL_HEAL_IN, COL_KILLS, COL_CRITS, COL_AVOID, COL_PCT };
-        private static readonly string[] ContributionHeaderNames = { "Name", "Contrib", "Dmg+", "Shield", "Guard", "Waste", "%" };
+        private static readonly string[] HeaderKeys = { "name", "bat", "dmg", "dot", "ovk", "rawTkn", "healOut", "healIn", "kills", "crits", "avoidPct", "comboApplied", "pct" };
+        private static readonly float[] FixedWidths = { 0f, COL_BATTLES, COL_DMG, COL_DOT, COL_OVK, COL_TAKEN, COL_HEAL_OUT, COL_HEAL_IN, COL_KILLS, COL_CRITS, COL_AVOID, COL_COMBO_APPLIED, COL_PCT };
 
         // Scale
         private float _scaleFactor = 1f;
@@ -133,7 +133,7 @@ namespace DD2DamageMeter
         private float GetNameWidth()
         {
             float contentW = _w - 30f;
-            float fixedTotal = COL_BATTLES + COL_DMG + COL_DOT + COL_OVK + COL_TAKEN + COL_HEAL_OUT + COL_HEAL_IN + COL_KILLS + COL_CRITS + COL_AVOID + COL_PCT;
+            float fixedTotal = COL_BATTLES + COL_DMG + COL_DOT + COL_OVK + COL_TAKEN + COL_HEAL_OUT + COL_HEAL_IN + COL_KILLS + COL_CRITS + COL_AVOID + COL_COMBO_APPLIED + COL_PCT;
             float nameW = contentW - fixedTotal - EDGE_MARGIN * 2;
             return nameW < 80f ? 80f : nameW;
         }
@@ -146,7 +146,7 @@ namespace DD2DamageMeter
             var prevMatrix = GUI.matrix;
             GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(_scaleFactor, _scaleFactor, 1f));
 
-            _rect = GUI.Window(729003, _rect, Win, "<b>Run Stats</b>", _windowStyle);
+            _rect = GUI.Window(729003, _rect, Win, DmText.T("runStatsTitle"), _windowStyle);
             _rect = UiUtil.ClampToScreen(_rect, _scaleFactor);
 
             GUI.matrix = prevMatrix;
@@ -162,16 +162,19 @@ namespace DD2DamageMeter
 
         private void Win(int id)
         {
-            int battleCount = _runTracker.GetBattleCount(_damageTracker, _contributionTracker);
+            bool remoteMode = DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out var remoteSnapshot);
+            DamageTracker currentTracker = remoteMode ? null : _damageTracker;
+            ContributionTracker currentContribution = remoteMode ? null : _contributionTracker;
+            int battleCount = _runTracker.GetBattleCount(currentTracker, currentContribution, remoteMode ? remoteSnapshot : null);
             if (battleCount == 0)
             {
-                GUILayout.Label("No battles recorded yet. Use Record button to start.", _labelStyle);
-                if (GUILayout.Button("Close", GUILayout.Width(60))) IsVisible = false;
+                GUILayout.Label(DmText.T("noBattles"), _labelStyle);
+                if (GUILayout.Button(DmText.T("close"), GUILayout.Width(60))) IsVisible = false;
                 GUI.DragWindow(new Rect(0, 0, _w, _h - RESIZE_HANDLE));
                 return;
             }
 
-            var (players, enemies) = _runTracker.GetMergedStats(_damageTracker, _contributionTracker);
+            var (players, enemies) = _runTracker.GetMergedStats(currentTracker, currentContribution, remoteMode ? remoteSnapshot : null);
             float scrollH = _h - 40f;
             float nameW = GetNameWidth();
 
@@ -180,14 +183,14 @@ namespace DD2DamageMeter
 
             _scroll = GUILayout.BeginScrollView(_scroll, GUILayout.Height(scrollH));
             {
-                GUILayout.Label($"--- Heroes ({battleCount} battles) ---", _titleStyle);
+                GUILayout.Label(DmText.Format("heroesRecorded", battleCount, remoteMode ? DmText.T("remoteSuffix") : string.Empty), _titleStyle);
                 DrawHeader(nameW);
                 float totalPDmg = 0; foreach (var s in players) totalPDmg += s.TotalDamageDealt;
                 int rowIdx = 0;
                 foreach (var s in players) DrawMergedRow(s, totalPDmg, nameW, rowIdx++);
                 GUILayout.Space(8);
 
-                GUILayout.Label("--- Enemies ---", _titleStyle);
+                GUILayout.Label(DmText.T("enemiesHeader"), _titleStyle);
                 DrawHeader(nameW);
                 float totalEDmg = 0; foreach (var s in enemies) totalEDmg += s.TotalDamageDealt;
                 rowIdx = 0;
@@ -197,7 +200,7 @@ namespace DD2DamageMeter
                 if (contributionRows.Count > 0)
                 {
                     GUILayout.Space(8);
-                    GUILayout.Label("--- Contribution ---", _titleStyle);
+                    GUILayout.Label(DmText.T("contribution"), _titleStyle);
                     float contributionNameW = GetContributionNameWidth();
                     DrawContributionHeader(contributionNameW);
                     rowIdx = 0;
@@ -207,7 +210,7 @@ namespace DD2DamageMeter
             }
             GUILayout.EndScrollView();
 
-            if (GUILayout.Button("Close", GUILayout.Width(60))) IsVisible = false;
+            if (GUILayout.Button(DmText.T("close"), GUILayout.Width(60))) IsVisible = false;
             GUI.Label(new Rect(_w - RESIZE_HANDLE - 2, _h - RESIZE_HANDLE - 2, RESIZE_HANDLE, RESIZE_HANDLE), "\u255a", _resizeStyle);
             GUI.DragWindow(new Rect(0, 0, _w, _h - RESIZE_HANDLE));
         }
@@ -221,12 +224,12 @@ namespace DD2DamageMeter
 
             float x = headerRect.x + EDGE_MARGIN;
             // Name column (left-aligned in header)
-            GUI.Label(new Rect(x, headerRect.y, nameW, headerRect.height), HeaderNames[0], _headerStyle);
+            GUI.Label(new Rect(x, headerRect.y, nameW, headerRect.height), DmText.T(HeaderKeys[0]), _headerStyle);
             x += nameW;
             // Fixed columns (center-aligned)
-            for (int i = 1; i < HeaderNames.Length; i++)
+            for (int i = 1; i < HeaderKeys.Length; i++)
             {
-                GUI.Label(new Rect(x, headerRect.y, FixedWidths[i], headerRect.height), HeaderNames[i], _headerStyle);
+                GUI.Label(new Rect(x, headerRect.y, FixedWidths[i], headerRect.height), DmText.T(HeaderKeys[i]), _headerStyle);
                 x += FixedWidths[i];
             }
         }
@@ -256,6 +259,7 @@ namespace DD2DamageMeter
             GUI.Label(new Rect(x, y, COL_KILLS, h), s.Kills > 0 ? $"{s.Kills}" : "-", _valueStyle); x += COL_KILLS;
             GUI.Label(new Rect(x, y, COL_CRITS, h), s.Crits > 0 ? $"{s.Crits}" : "-", _valueStyle); x += COL_CRITS;
             GUI.Label(new Rect(x, y, COL_AVOID, h), UiUtil.FormatAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks), _valueStyle); x += COL_AVOID;
+            GUI.Label(new Rect(x, y, COL_COMBO_APPLIED, h), s.ComboApplied > 0 ? $"{s.ComboApplied}" : "-", _valueStyle); x += COL_COMBO_APPLIED;
             float pct = totalDmg > 0 ? s.TotalDamageDealt / totalDmg * 100f : 0f;
             GUI.Label(new Rect(x, y, COL_PCT, h), $"{pct:F1}%", _valueStyle);
         }
@@ -263,7 +267,7 @@ namespace DD2DamageMeter
         private float GetContributionNameWidth()
         {
             float contentW = _w - 30f;
-            float fixedTotal = COL_CONTRIB + COL_BONUS + COL_SHIELD + COL_GUARD + COL_WASTE + COL_CONTRIB_PCT;
+            float fixedTotal = COL_CONTRIB + COL_BONUS + COL_VULN + COL_SHIELD + COL_GUARD + 58f + COL_CONTRIB_PCT;
             float nameW = contentW - fixedTotal - EDGE_MARGIN * 2;
             return nameW < 120f ? 120f : nameW;
         }
@@ -275,11 +279,20 @@ namespace DD2DamageMeter
             if (players == null) return rows;
             foreach (var s in players)
             {
-                if (s.TotalContribution <= 0.01f && s.ShieldWasted <= 0) continue;
+                if (s.TotalContribution <= 0.01f && s.ComboConsumed <= 0) continue;
                 rows.Add(s);
                 totalContribution += s.TotalContribution;
             }
-            rows.Sort((a, b) => b.TotalContribution.CompareTo(a.TotalContribution));
+            rows.Sort((a, b) =>
+            {
+                int result = b.TotalContribution.CompareTo(a.TotalContribution);
+                if (result != 0) return result;
+                result = b.VulnerableDamageContribution.CompareTo(a.VulnerableDamageContribution);
+                if (result != 0) return result;
+                result = b.ComboConsumed.CompareTo(a.ComboConsumed);
+                if (result != 0) return result;
+                return string.Compare(a.ActorName, b.ActorName, System.StringComparison.CurrentCultureIgnoreCase);
+            });
             return rows;
         }
 
@@ -289,13 +302,14 @@ namespace DD2DamageMeter
             GUI.DrawTexture(new Rect(headerRect.x, headerRect.y, headerRect.width, headerRect.height), _headerBgTex);
 
             float x = headerRect.x + EDGE_MARGIN;
-            GUI.Label(new Rect(x, headerRect.y, nameW, headerRect.height), ContributionHeaderNames[0], _headerStyle); x += nameW;
-            GUI.Label(new Rect(x, headerRect.y, COL_CONTRIB, headerRect.height), ContributionHeaderNames[1], _headerStyle); x += COL_CONTRIB;
-            GUI.Label(new Rect(x, headerRect.y, COL_BONUS, headerRect.height), ContributionHeaderNames[2], _headerStyle); x += COL_BONUS;
-            GUI.Label(new Rect(x, headerRect.y, COL_SHIELD, headerRect.height), ContributionHeaderNames[3], _headerStyle); x += COL_SHIELD;
-            GUI.Label(new Rect(x, headerRect.y, COL_GUARD, headerRect.height), ContributionHeaderNames[4], _headerStyle); x += COL_GUARD;
-            GUI.Label(new Rect(x, headerRect.y, COL_WASTE, headerRect.height), ContributionHeaderNames[5], _headerStyle); x += COL_WASTE;
-            GUI.Label(new Rect(x, headerRect.y, COL_CONTRIB_PCT, headerRect.height), ContributionHeaderNames[6], _headerStyle);
+            GUI.Label(new Rect(x, headerRect.y, nameW, headerRect.height), DmText.T("name"), _headerStyle); x += nameW;
+            GUI.Label(new Rect(x, headerRect.y, COL_CONTRIB, headerRect.height), DmText.T("contrib"), _headerStyle); x += COL_CONTRIB;
+            GUI.Label(new Rect(x, headerRect.y, COL_BONUS, headerRect.height), DmText.T("dmgPlus"), _headerStyle); x += COL_BONUS;
+            GUI.Label(new Rect(x, headerRect.y, COL_VULN, headerRect.height), DmText.T("vulnerable"), _headerStyle); x += COL_VULN;
+            GUI.Label(new Rect(x, headerRect.y, COL_SHIELD, headerRect.height), DmText.T("shield"), _headerStyle); x += COL_SHIELD;
+            GUI.Label(new Rect(x, headerRect.y, COL_GUARD, headerRect.height), DmText.T("guard"), _headerStyle); x += COL_GUARD;
+            GUI.Label(new Rect(x, headerRect.y, 58f, headerRect.height), DmText.T("comboConsumed"), _headerStyle); x += 58f;
+            GUI.Label(new Rect(x, headerRect.y, COL_CONTRIB_PCT, headerRect.height), DmText.T("pct"), _headerStyle);
         }
 
         private void DrawContributionRow(RunStatsTracker.MergedStats s, float totalContribution, float nameW, int rowIndex)
@@ -312,9 +326,10 @@ namespace DD2DamageMeter
             GUI.Label(new Rect(x, y, nameW, h), nm, _labelStyle); x += nameW;
             GUI.Label(new Rect(x, y, COL_CONTRIB, h), s.TotalContribution > 0 ? $"{s.TotalContribution:F1}" : "-", _valueStyle); x += COL_CONTRIB;
             GUI.Label(new Rect(x, y, COL_BONUS, h), s.BonusDamageContribution > 0 ? $"{s.BonusDamageContribution:F1}" : "-", _valueStyle); x += COL_BONUS;
+            GUI.Label(new Rect(x, y, COL_VULN, h), s.VulnerableDamageContribution > 0 ? $"{s.VulnerableDamageContribution:F1}" : "-", _valueStyle); x += COL_VULN;
             GUI.Label(new Rect(x, y, COL_SHIELD, h), s.ShieldContribution > 0 ? $"{s.ShieldContribution:F1}" : "-", _valueStyle); x += COL_SHIELD;
             GUI.Label(new Rect(x, y, COL_GUARD, h), s.GuardContribution > 0 ? $"{s.GuardContribution:F1}" : "-", _valueStyle); x += COL_GUARD;
-            GUI.Label(new Rect(x, y, COL_WASTE, h), s.ShieldWasted > 0 ? $"{s.ShieldWasted}" : "-", _valueStyle); x += COL_WASTE;
+            GUI.Label(new Rect(x, y, 58f, h), s.ComboConsumed > 0 ? $"{s.ComboConsumed}" : "-", _valueStyle); x += 58f;
             GUI.Label(new Rect(x, y, COL_CONTRIB_PCT, h), $"{pct:F1}%", _valueStyle);
         }
     }
