@@ -2,20 +2,21 @@
 
 [English README](README.md)
 
-DD2 Damage Meter 是一个用于《Darkest Dungeon II》的非官方 BepInEx 插件。它会在游戏内显示战斗统计覆盖层，并提供战斗日志、Buff/Debuff 记录、多场战斗统计和导出功能。
+DD2 Damage Meter 是一个用于《Darkest Dungeon II》的非官方 BepInEx 5 插件。它提供游戏内战斗统计覆盖层、战斗日志、贡献统计，以及单场战斗和多场战斗记录导出。
 
-本插件主要用于本地游玩分析和调试，不隶属于 Red Hook Studios。
+本项目用于本地战斗分析、Mod 调试和战后复盘，不隶属于 Red Hook Studios。
 
-## 功能
+## 主要功能
 
-- 游戏内英雄和敌方伤害统计面板。
-- 统计直接伤害、DOT 伤害、过量伤害、理论承伤、实际承伤、治疗、击杀、暴击和闪避率。
-- 玩家贡献统计，包括增伤贡献、护盾抵消、守护保护和浪费护盾。
-- 可拖动、可缩放的 IMGUI 覆盖窗口。
-- 战斗日志，记录伤害、治疗、DOT、压力、死亡和击杀。
-- 独立 Buff/Debuff 日志，记录具体状态、Token 和效果细节。
-- 支持跨多场战斗的整局记录与合并统计。
-- 支持导出 TXT 战斗报告和 CSV 整局统计。
+- 统计我方和敌方的直接伤害、DOT 伤害、有效伤害、理论承伤、溢出伤害过滤、治疗、击杀、暴击、闪避、压力事件和死亡事件。
+- 统计辅助贡献，包括力量、易伤、连击、守护、格挡、闪避、护盾抵消、阻止 DOT 伤害，以及部分地板效果来源。
+- 剔除对尸体造成的无效伤害和溢出治疗，减少假账。
+- 提供可拖拽、可缩放的 IMGUI 窗口，用于实时统计、战斗日志和 Buff/Debuff 日志。
+- 支持跨多场战斗的整局记录，并可合并导出。
+- 支持导出可读战斗报告和 CSV 整局统计。
+- 暴露轻量接口，供 DD2SteamMP 和 DD2DamageMeterAdvancedStats 读取数据。
+
+如果需要更细的来源拆分，请同时安装 [DD2DamageMeterAdvancedStats](https://github.com/superexboom/DD2DamageMeterAdvancedStats)。
 
 ## 快捷键
 
@@ -23,61 +24,69 @@ DD2 Damage Meter 是一个用于《Darkest Dungeon II》的非官方 BepInEx 插
 | --- | --- |
 | `F2` | 隐藏或显示全部覆盖窗口 |
 | `F3` | 重置当前战斗统计 |
-| `F4` | 导出 TXT 战斗报告 |
+| `F4` | 导出当前战斗报告 |
 
-插件刻意避开 `F5`，因为它会和游戏内置截图快捷键冲突。
+插件刻意避开 `F5`，因为它会和游戏截图快捷键冲突。
 
-## 窗口控制
+## 游戏内控制
 
-- `Heroes` / `Enemies`：在英雄队伍和敌方队伍统计之间切换。
-- `Log`：打开或关闭战斗日志。
-- `Buff/Debuff`：从战斗日志窗口打开或关闭独立状态日志。
+- `Heroes` / `Enemies`：切换我方和敌方统计表。
+- `Log`：打开战斗日志。
+- `Buff/Debuff`：从战斗日志窗口打开状态日志。
 - `Record Run`：开始或停止多场战斗记录。
-- `Auto Rec`：保存插件加载时是否自动开始整局记录。
-- `Run Stats`：查看已记录战斗的合并统计。
-- `Export CSV`：导出整局统计 CSV。
-- `Export Dir`：设置 TXT 和 CSV 导出文件夹。
-
-## 环境要求
-
-- 《Darkest Dungeon II》
-- 游戏目录中已安装 BepInEx 5.x。理论上 BepInEx 5.0+ 即可；插件当前使用 BepInEx 5.4.23.5 测试。
-- 需要使用常规 Unity/Mono 版 BepInEx，不要使用 IL2CPP 版。
-- 能够构建 `net48` 的 .NET SDK 或构建工具
-- 来自游戏 `Darkest Dungeon II_Data/Managed` 目录的程序集文件
-
-## 构建
-
-1. 编辑 `Directory.Build.props`。
-2. 将 `BepInExDir` 设置为游戏的 `BepInEx` 目录。
-3. 将 `ManagedDir` 设置为游戏的 `Darkest Dungeon II_Data/Managed` 目录。
-4. 构建项目：
-
-```powershell
-dotnet build .\DD2DamageMeter.csproj
-```
-
-编译后的插件 DLL 会输出到 `bin\Debug\net48\` 或 `bin\Release\net48\`，取决于构建配置。
+- `Auto Rec`：记住是否自动开始记录。
+- `Run Stats`：查看整局合并统计。
+- `Export CSV`：导出已记录的整局统计。
+- `Export Dir`：选择报告输出目录。
 
 ## 安装
 
-1. 构建项目。
-2. 将 `DD2DamageMeter.dll` 复制到游戏的 `BepInEx\plugins\` 目录。
-3. 启动已启用 BepInEx 的游戏。
-4. 进入战斗后等待插件注册游戏事件；事件管理器就绪后覆盖层会开始工作。
+先为普通 Unity/Mono 版《Darkest Dungeon II》安装 BepInEx 5，然后把 release zip 解压到游戏目录。
+
+预期目录结构：
+
+```text
+Darkest Dungeon II/
+└─ BepInEx/
+   └─ plugins/
+      └─ DD2DamageMeter/
+         └─ DD2DamageMeter.dll
+```
+
+通过 Steam 启动已启用 BepInEx 的游戏。插件会在游戏事件管理器就绪后开始刷新，通常是在进入战斗后。
 
 ## 导出
 
-导出文件会写到已配置的导出文件夹。默认情况下，该目录是已加载插件 DLL 所在目录：
+默认情况下，导出文件会写到插件 DLL 所在目录；也可以在界面中设置自定义导出目录。
 
 - `DD2_Report_yyyyMMdd_HHmmss.txt`：当前战斗报告。
 - `DD2_Run_yyyyMMdd_HHmmss.csv`：已记录整局统计。
 
-设置由 BepInEx 保存到 `BepInEx\config\com.dd2.damagemeter.cfg`。
+设置由 BepInEx 保存到 `BepInEx/config/com.dd2.damagemeter.cfg`。
 
-## 注意事项
+## 环境要求
 
-- 新战斗开始时，当前战斗统计会自动重置。
-- 整局记录可以跨多场战斗捕获并合并角色统计。
-- 游戏更新可能改变内部事件类型或字段，因此可能需要同步更新插件。
-- 部分数值依赖游戏事件语义和对游戏程序集的反射，应视为实用战斗遥测，而不是官方战斗日志。
+- 《Darkest Dungeon II》
+- BepInEx 5.x，当前使用 BepInEx 5.4.23.5 测试
+- Unity/Mono 版 BepInEx，不是 IL2CPP 版
+- 能够构建 `net48` 的 .NET SDK 或构建工具
+- 来自 `Darkest Dungeon II_Data/Managed` 的本地游戏程序集
+
+## 构建
+
+1. 将 `Directory.Build.props.example` 复制为 `Directory.Build.props`。
+2. 将 `BepInExDir` 设置为游戏的 `BepInEx` 目录。
+3. 将 `ManagedDir` 设置为游戏的 `Darkest Dungeon II_Data/Managed` 目录。
+4. 构建：
+
+```powershell
+dotnet build .\DD2DamageMeter.csproj -c Release
+```
+
+源码仓库刻意排除了游戏程序集、反编译游戏代码、本地安装路径、导出资源和构建产物。
+
+## 兼容性说明
+
+- 游戏更新可能改变内部事件字段，因此可能需要同步更新插件。
+- 数值来自游戏事件和运行时补丁，是实用战斗遥测，不是官方战斗日志。
+- 更细的来源分析放在 DD2DamageMeterAdvancedStats 中，基础 Damage Meter 只保留稳定常用统计。
