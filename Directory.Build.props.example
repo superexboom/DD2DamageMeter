@@ -1,0 +1,7 @@
+<Project>
+  <PropertyGroup>
+    <!-- Set these to your local Darkest Dungeon II installation. -->
+    <BepInExDir>D:\SteamLibrary\steamapps\common\Darkest Dungeon庐 II\BepInEx</BepInExDir>
+    <ManagedDir>D:\SteamLibrary\steamapps\common\Darkest Dungeon庐 II\Darkest Dungeon II_Data\Managed</ManagedDir>
+  </PropertyGroup>
+</Project>

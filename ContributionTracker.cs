@@ -5,11 +5,13 @@ using Assets.Code.Actor;
 using Assets.Code.Actor.ActorContainer;
 using Assets.Code.Buff;
 using Assets.Code.Buff.Events;
+using Assets.Code.Combat;
 using Assets.Code.Combat.Events;
 using Assets.Code.Dot;
 using Assets.Code.Dot.Events;
 using Assets.Code.Effect;
 using Assets.Code.Library;
+using Assets.Code.Rules;
 using Assets.Code.Skill.Events;
 using Assets.Code.Source;
 using Assets.Code.Token;
@@ -30,10 +32,11 @@ namespace DD2DamageMeter
             public float VulnerableDamage;
             public float ShieldPrevented;
             public float GuardProtected;
+            public float DotDamagePrevented;
             public int ShieldWasted;
             public int ComboApplied;
             public int ComboConsumed;
-            public float TotalContribution => BonusDamage + VulnerableDamage + ShieldPrevented + GuardProtected;
+            public float TotalContribution => BonusDamage + VulnerableDamage + ShieldPrevented + GuardProtected + DotDamagePrevented;
         }
 
         private enum ContributionKind
@@ -42,6 +45,13 @@ namespace DD2DamageMeter
             Vulnerable,
             Shield,
             Guard
+        }
+
+        private enum DamageAmplifierGroupKind
+        {
+            PerformerDamage,
+            TargetDamageTaken,
+            Crit
         }
 
         private class ActiveEffect
@@ -54,6 +64,33 @@ namespace DD2DamageMeter
             public float DamageBonusPct;
             public bool Used;
             public bool IsBuff;
+            public bool IsFloor;
+            public int FloorPlacementId;
+        }
+
+        private class DamageAmplifierSource
+        {
+            public ActiveEffect Effect;
+            public DamageAmplifierGroupKind GroupKind;
+            public float BonusPct;
+        }
+
+        private class DamageAmplifierGroup
+        {
+            public DamageAmplifierGroupKind Kind;
+            public float Multiplier = 1f;
+            public readonly List<DamageAmplifierSource> Sources = new List<DamageAmplifierSource>();
+
+            public float WeightSum
+            {
+                get
+                {
+                    float sum = 0f;
+                    for (int i = 0; i < Sources.Count; i++)
+                        sum += Mathf.Max(0f, Sources[i].BonusPct);
+                    return sum;
+                }
+            }
         }
 
         private class StatusSourceHint
@@ -79,6 +116,15 @@ namespace DD2DamageMeter
             public int Count;
         }
 
+        private class ActiveDotSnapshot
+        {
+            public uint TargetGuid;
+            public string DotId;
+            public string DotType;
+            public int RemainingTurns;
+            public float DamagePerTick;
+        }
+
         private class ActiveCombo
         {
             public uint TargetGuid;
@@ -93,26 +139,6 @@ namespace DD2DamageMeter
             public uint ConsumerGuid;
             public string SkillId;
             public int Round;
-        }
-
-        private class FloorSource
-        {
-            public uint TargetGuid;
-            public uint ProviderGuid;
-            public int TeamIndex = -1;
-            public int TeamPosition = -1;
-            public string BuffId;
-            public string SkillId;
-            public string SourceId;
-            public bool DirectDamageBonus;
-            public bool DirectShield;
-            public readonly List<string> FloorEffectIds = new List<string>();
-            public readonly List<string> DamageTokenIds = new List<string>();
-            public readonly List<string> DamageTokenTags = new List<string>();
-            public readonly List<string> DamageBuffIds = new List<string>();
-            public readonly List<string> ShieldTokenIds = new List<string>();
-            public readonly List<string> ShieldTokenTags = new List<string>();
-            public readonly List<string> ShieldBuffIds = new List<string>();
         }
 
         private struct ProjectedHealth
@@ -134,8 +160,9 @@ namespace DD2DamageMeter
         private readonly List<GuardedDot> _activeGuardedDots = new List<GuardedDot>();
         private readonly List<GuardedDot> _expiredGuardedDots = new List<GuardedDot>();
         private readonly Dictionary<uint, ProjectedHealth> _dotProjectedHp = new Dictionary<uint, ProjectedHealth>();
+        private readonly Dictionary<uint, List<ActiveDotSnapshot>> _activeDotSnapshots = new Dictionary<uint, List<ActiveDotSnapshot>>();
         private readonly List<StatusSourceHint> _statusHints = new List<StatusSourceHint>();
-        private readonly List<FloorSource> _floorSources = new List<FloorSource>();
+        private readonly FloorEffectSourceTracker _floorEffectSources;
         private readonly Dictionary<uint, ActiveCombo> _activeCombos = new Dictionary<uint, ActiveCombo>();
         private readonly List<PendingComboConsume> _pendingComboConsumes = new List<PendingComboConsume>();
 
@@ -144,6 +171,15 @@ namespace DD2DamageMeter
         private int _currentRound;
 
         public IReadOnlyList<ContributionStats> PlayerStats => _playerSnapshot;
+
+        public ContributionTracker() : this(null)
+        {
+        }
+
+        internal ContributionTracker(FloorEffectSourceTracker floorEffectSources)
+        {
+            _floorEffectSources = floorEffectSources ?? new FloorEffectSourceTracker();
+        }
 
         public void OnBattleBegin(EventBattleBegin evt)
         {
@@ -172,12 +208,12 @@ namespace DD2DamageMeter
                         CacheStatusHints(ar, evt.SkillId ?? "");
                     }
                     CacheComboConsumptionHints(evt);
-                    RecordFloorContributionSources(evt);
 
                     var projectedHp = new Dictionary<uint, float>();
                     foreach (var ar in evt.ActorResults)
                     {
                         if (ar == null) continue;
+                        if (DamageTracker.IsCorpseActorPublic(ar.m_TargetActorGuid)) continue;
 
                         float hpBefore = 0f;
                         bool hasHpBefore = ar.IsDamaging || ar.IsBlocked;
@@ -186,8 +222,7 @@ namespace DD2DamageMeter
 
                         if (ar.IsDamaging)
                         {
-                            TrackDamageBonusContribution(ar, hpBefore);
-                            TrackVulnerableContribution(ar, hpBefore);
+                            TrackDirectDamageAmplifierContribution(ar, hpBefore);
                             float effectiveDamage = Mathf.Min(ar.HealthDamage, Mathf.Max(0f, hpBefore));
                             projectedHp[ar.m_TargetActorGuid] = Mathf.Max(0f, hpBefore - effectiveDamage);
                         }
@@ -226,6 +261,7 @@ namespace DD2DamageMeter
                         evt.m_SourceType,
                         evt.m_SourceId
                     );
+                    SyncDotSnapshots(evt.m_Actor);
                 }
             }
             catch (Exception ex)
@@ -253,6 +289,9 @@ namespace DD2DamageMeter
                         AddGuardedDot(_expiredGuardedDots, removed);
                     else
                         RemoveActiveGuardedDot(removed.TargetGuid, removed.DotId, removed.DotType, null, null, 1);
+
+                    TrackDotDamagePrevention(evt);
+                    SyncDotSnapshots(evt.Actor);
                 }
             }
             catch (Exception ex)
@@ -273,6 +312,14 @@ namespace DD2DamageMeter
                     if (result == null)
                     {
                         ApplyExpiredGuardedDots(targetGuid, dotType);
+                        SyncDotSnapshotsByGuid(targetGuid);
+                        return;
+                    }
+
+                    if (DamageTracker.IsCorpseActorPublic(targetGuid))
+                    {
+                        ApplyExpiredGuardedDots(targetGuid, dotType);
+                        SyncDotSnapshotsByGuid(targetGuid);
                         return;
                     }
 
@@ -285,6 +332,7 @@ namespace DD2DamageMeter
                     }
 
                     ApplyExpiredGuardedDots(targetGuid, dotType);
+                    SyncDotSnapshotsByGuid(targetGuid);
                 }
             }
             catch (Exception ex)
@@ -304,14 +352,15 @@ namespace DD2DamageMeter
                     TrackComboAdded(evt, token);
                     TrackVulnerableAdded(evt, token);
 
-                    float bonusPct = GetDamageBonusPct(token);
-                    bool isDamageBonus = bonusPct > 0.0001f || IsDamageBonusToken(token);
+                    float bonusPct = GetTokenContributionBonusPct(token);
+                    bool isDamageBonus = bonusPct > 0.0001f || IsDamageBonusToken(token) || IsCritToken(token);
                     bool isShield = IsShieldToken(token);
                     bool isGuard = IsGuardToken(token);
                     if (!isDamageBonus && !isShield && !isGuard) return;
 
                     uint sourceGuid = 0;
                     string sourceId = evt.m_SourceId ?? "";
+                    FloorEffectSourceTracker.SourceMarker floorMarker = null;
                     var hint = ConsumeStatusHint(evt.m_ActorGuid, evt.m_TokenId, "ADD", evt.m_SourceId);
                     if (hint != null && IsContributionSource(hint.SourceType, hint.SourceId))
                     {
@@ -328,10 +377,10 @@ namespace DD2DamageMeter
                     }
 
                     if (!IsEligibleFriendlyExternalSource(sourceGuid, evt.m_ActorGuid) &&
-                        TryResolveFloorTokenSource(evt.m_ActorGuid, evt.m_TokenId, evt.m_SourceType, evt.m_SourceId, isDamageBonus, isShield, out var floorGuid, out var floorSourceId))
+                        _floorEffectSources.TryResolveTokenSource(evt.m_ActorGuid, evt.m_TokenId, evt.m_SourceType, evt.m_SourceId, out floorMarker))
                     {
-                        sourceGuid = floorGuid;
-                        if (!string.IsNullOrEmpty(floorSourceId)) sourceId = floorSourceId;
+                        sourceGuid = floorMarker.ProviderGuid;
+                        if (!string.IsNullOrEmpty(floorMarker.SourceId)) sourceId = floorMarker.SourceId;
                     }
 
                     if (!IsEligibleFriendlyExternalSource(sourceGuid, evt.m_ActorGuid)) return;
@@ -340,11 +389,11 @@ namespace DD2DamageMeter
                     for (int i = 0; i < amount; i++)
                     {
                         if (isDamageBonus && bonusPct > 0.0001f)
-                            AddActiveEffect(evt.m_ActorGuid, sourceGuid, evt.m_TokenId, sourceId, ContributionKind.DamageBonus, bonusPct, false);
+                            AddActiveEffect(evt.m_ActorGuid, sourceGuid, evt.m_TokenId, sourceId, ContributionKind.DamageBonus, bonusPct, false, floorMarker);
                         if (isShield)
-                            AddActiveEffect(evt.m_ActorGuid, sourceGuid, evt.m_TokenId, sourceId, ContributionKind.Shield, 0f, false);
+                            AddActiveEffect(evt.m_ActorGuid, sourceGuid, evt.m_TokenId, sourceId, ContributionKind.Shield, 0f, false, floorMarker);
                         if (isGuard)
-                            AddActiveEffect(evt.m_ActorGuid, sourceGuid, evt.m_TokenId, sourceId, ContributionKind.Guard, 0f, false);
+                            AddActiveEffect(evt.m_ActorGuid, sourceGuid, evt.m_TokenId, sourceId, ContributionKind.Guard, 0f, false, floorMarker);
                     }
                 }
             }
@@ -373,7 +422,7 @@ namespace DD2DamageMeter
 
                     if (!IsPlayerTeam(evt.m_ActorGuid)) return;
 
-                    if (IsDamageBonusToken(token) || GetDamageBonusPct(token) > 0.0001f)
+                    if (IsDamageBonusToken(token) || IsCritToken(token) || GetTokenContributionBonusPct(token) > 0.0001f)
                     {
                         var effect = PopActiveEffect(evt.m_ActorGuid, evt.m_TokenId, ContributionKind.DamageBonus);
                         if (effect != null) AddPending(_pendingDamageEffects, evt.m_ActorGuid, effect);
@@ -420,10 +469,16 @@ namespace DD2DamageMeter
 
                     bool combatRemoval = IsSourceType(evt.Source, "combat");
                     bool transferRemoval = IsSourceType(evt.Source, "locked_team_position_transfer");
-                    if ((combatRemoval || transferRemoval) && (IsDamageBonusToken(evt.Token) || GetDamageBonusPct(evt.Token) > 0.0001f))
+                    if (IsDamageBonusToken(evt.Token) || IsCritToken(evt.Token) || GetTokenContributionBonusPct(evt.Token) > 0.0001f)
                     {
                         var damageEffect = PopActiveEffect(targetGuid, evt.Token.Id, ContributionKind.DamageBonus);
-                        if (damageEffect != null) AddPending(_pendingDamageEffects, targetGuid, damageEffect);
+                        if (damageEffect != null)
+                        {
+                            if (combatRemoval || transferRemoval)
+                                AddPending(_pendingDamageEffects, targetGuid, damageEffect);
+                            else
+                                _snapshotDirty = true;
+                        }
                         return;
                     }
 
@@ -468,35 +523,23 @@ namespace DD2DamageMeter
                     bool isShieldBuff = GetDamageReductionPct(evt.Buff) > 0.0001f;
                     uint providerGuid = evt.PerformerActorGuid;
                     string sourceId = evt.SourceId ?? "";
-                    bool lockedFloorBuff = TryResolveLockedBuffSource(evt.TargetActorGuid, evt.Buff.Id, out var lockedProviderGuid, out var lockedSourceId);
-                    if (lockedFloorBuff)
+                    bool markedFloorBuff = _floorEffectSources.TryResolveBuffSource(evt.TargetActorGuid, evt.Buff.Id, evt.SourceType, evt.SourceId, out var floorMarker);
+                    if (markedFloorBuff)
                     {
-                        if (lockedProviderGuid != 0) providerGuid = lockedProviderGuid;
-                        if (!string.IsNullOrEmpty(lockedSourceId)) sourceId = lockedSourceId;
-                    }
-
-                    bool allowedSource = IsContributionSource(evt.SourceType, evt.SourceId) || lockedFloorBuff;
-                    if ((!allowedSource || !IsEligibleFriendlyExternalSource(providerGuid, evt.TargetActorGuid)) &&
-                        (damagePct > 0.0001f || isShieldBuff) &&
-                        TryResolveFloorBuffSource(evt.TargetActorGuid, evt.Buff.Id, evt.SourceType, evt.SourceId, damagePct > 0.0001f, isShieldBuff, out var floorProviderGuid, out var floorSourceId))
-                    {
-                        providerGuid = floorProviderGuid;
-                        if (!string.IsNullOrEmpty(floorSourceId)) sourceId = floorSourceId;
+                        if (floorMarker.ProviderGuid != 0) providerGuid = floorMarker.ProviderGuid;
+                        if (!string.IsNullOrEmpty(floorMarker.SourceId)) sourceId = floorMarker.SourceId;
                     }
 
                     if (!IsEligibleFriendlyExternalSource(providerGuid, evt.TargetActorGuid)) return;
 
-                    if (lockedFloorBuff)
-                        AddOrUpdateFloorSource(evt.TargetActorGuid, providerGuid, evt.Buff, sourceId);
-
                     if (damagePct > 0.0001f)
                     {
-                        AddActiveEffect(evt.TargetActorGuid, providerGuid, evt.Buff.Id, sourceId, ContributionKind.DamageBonus, damagePct, true);
+                        AddActiveEffect(evt.TargetActorGuid, providerGuid, evt.Buff.Id, sourceId, ContributionKind.DamageBonus, damagePct, true, markedFloorBuff ? floorMarker : null);
                     }
 
                     if (isShieldBuff)
                     {
-                        AddActiveEffect(evt.TargetActorGuid, providerGuid, evt.Buff.Id, sourceId, ContributionKind.Shield, 0f, true);
+                        AddActiveEffect(evt.TargetActorGuid, providerGuid, evt.Buff.Id, sourceId, ContributionKind.Shield, 0f, true, markedFloorBuff ? floorMarker : null);
                     }
                 }
             }
@@ -514,10 +557,8 @@ namespace DD2DamageMeter
                 {
                     if (evt.Buff == null) return;
                     bool transferRemoval = IsSourceType(evt.Source, "locked_team_position_transfer");
-                    if (!transferRemoval)
-                        RemoveFloorSource(evt.ActorGuid, evt.Buff.Id);
-                    var damageEffect = PopActiveEffect(evt.ActorGuid, evt.Buff.Id, ContributionKind.DamageBonus);
-                    var shieldEffect = PopActiveEffect(evt.ActorGuid, evt.Buff.Id, ContributionKind.Shield);
+                    var damageEffect = PopActiveEffect(evt.ActorGuid, evt.Buff.Id, ContributionKind.DamageBonus, false);
+                    var shieldEffect = PopActiveEffect(evt.ActorGuid, evt.Buff.Id, ContributionKind.Shield, false);
                     if (damageEffect != null)
                     {
                         if (transferRemoval)
@@ -569,8 +610,9 @@ namespace DD2DamageMeter
                 _activeGuardedDots.Clear();
                 _expiredGuardedDots.Clear();
                 _dotProjectedHp.Clear();
+                _activeDotSnapshots.Clear();
                 _statusHints.Clear();
-                _floorSources.Clear();
+                _floorEffectSources.Reset();
                 _activeCombos.Clear();
                 _pendingComboConsumes.Clear();
                 _playerSnapshot = Array.Empty<ContributionStats>();
@@ -579,66 +621,192 @@ namespace DD2DamageMeter
             }
         }
 
-        private void TrackDamageBonusContribution(Assets.Code.Skill.SkillCalculation.ActorResult ar, float hpBefore)
+        private void TrackDirectDamageAmplifierContribution(Assets.Code.Skill.SkillCalculation.ActorResult ar, float hpBefore)
         {
             uint performerGuid = ar.m_PerformerActorGuid;
             uint targetGuid = ar.m_TargetActorGuid;
             if (performerGuid == 0 || targetGuid == 0 || performerGuid == targetGuid) return;
             if (!IsPlayerTeam(performerGuid) || IsPlayerTeam(targetGuid)) return;
 
-            var effects = GetDamageEffectsForActor(performerGuid);
-            if (effects.Count == 0)
-                effects = GetCurrentFloorDamageEffectsForActor(performerGuid);
-            if (effects.Count == 0) return;
+            float totalDamage = Mathf.Max(0f, ar.HealthDamage);
+            float effectiveDamage = Mathf.Min(totalDamage, Mathf.Max(0f, hpBefore));
+            if (totalDamage <= 0.0001f || effectiveDamage <= 0.0001f) return;
 
-            float totalBonusPct = 0f;
-            for (int i = 0; i < effects.Count; i++)
-                totalBonusPct += Mathf.Max(0f, effects[i].DamageBonusPct);
-            if (totalBonusPct <= 0.0001f) return;
+            var groups = BuildDamageAmplifierGroups(
+                GetDamageEffectsForActor(performerGuid),
+                GetVulnerableEffectsForTarget(targetGuid),
+                GetActorResultCritScore(ar));
+            if (groups.Count == 0) return;
 
-            float effectiveWithBuff = Mathf.Min(ar.HealthDamage, Mathf.Max(0f, hpBefore));
-            float damageWithoutSkillBuff = ar.HealthDamage / (1f + totalBonusPct);
-            float effectiveWithoutBuff = Mathf.Min(damageWithoutSkillBuff, Mathf.Max(0f, hpBefore));
-            float contribution = Mathf.Max(0f, effectiveWithBuff - effectiveWithoutBuff);
-            if (contribution <= 0.0001f) return;
+            var groupContributions = CalculateShapleyGroupContributions(groups, totalDamage, effectiveDamage);
 
-            for (int i = 0; i < effects.Count; i++)
+            bool changed = false;
+            for (int groupIndex = 0; groupIndex < groups.Count; groupIndex++)
             {
-                var effect = effects[i];
-                float pct = Mathf.Max(0f, effect.DamageBonusPct);
-                if (pct <= 0f) continue;
-                float share = contribution * (pct / totalBonusPct);
-                var stats = GetOrCreate(effect.ProviderGuid);
-                stats.BonusDamage += share;
-                effect.Used = true;
+                float groupContribution = groupContributions[groupIndex];
+                if (groupContribution <= 0.0001f) continue;
+
+                DamageAmplifierGroup group = groups[groupIndex];
+                float weightSum = group.WeightSum;
+                if (weightSum <= 0.0001f) continue;
+
+                for (int sourceIndex = 0; sourceIndex < group.Sources.Count; sourceIndex++)
+                {
+                    DamageAmplifierSource source = group.Sources[sourceIndex];
+                    if (source?.Effect == null || source.Effect.ProviderGuid == 0) continue;
+                    float sourceWeight = Mathf.Max(0f, source.BonusPct);
+                    if (sourceWeight <= 0.0001f) continue;
+
+                    float share = groupContribution * sourceWeight / weightSum;
+                    if (share <= 0.0001f) continue;
+
+                    var stats = GetOrCreate(source.Effect.ProviderGuid);
+                    if (group.Kind == DamageAmplifierGroupKind.TargetDamageTaken)
+                        stats.VulnerableDamage += share;
+                    else
+                        stats.BonusDamage += share;
+                    source.Effect.Used = true;
+                    changed = true;
+                }
             }
-            _snapshotDirty = true;
+
+            if (changed)
+                _snapshotDirty = true;
         }
 
-        private void TrackVulnerableContribution(Assets.Code.Skill.SkillCalculation.ActorResult ar, float hpBefore)
+        private static List<DamageAmplifierGroup> BuildDamageAmplifierGroups(List<ActiveEffect> damageEffects, List<ActiveEffect> vulnerableEffects, int critScore)
         {
-            uint performerGuid = ar.m_PerformerActorGuid;
-            uint targetGuid = ar.m_TargetActorGuid;
-            if (performerGuid == 0 || targetGuid == 0 || performerGuid == targetGuid) return;
-            if (!IsPlayerTeam(performerGuid) || IsPlayerTeam(targetGuid)) return;
+            var groups = new List<DamageAmplifierGroup>();
+            AddDamageAmplifierSources(groups, damageEffects, DamageAmplifierGroupKind.PerformerDamage, critScore);
+            AddDamageAmplifierSources(groups, vulnerableEffects, DamageAmplifierGroupKind.TargetDamageTaken, critScore);
+            return groups;
+        }
 
-            var effects = GetVulnerableEffectsForTarget(targetGuid);
-            if (effects.Count == 0) return;
+        private static void AddDamageAmplifierSources(List<DamageAmplifierGroup> groups, List<ActiveEffect> effects, DamageAmplifierGroupKind defaultGroupKind, int critScore)
+        {
+            if (effects == null || effects.Count == 0) return;
 
-            float effectiveDamage = Mathf.Min(Mathf.Max(0f, ar.HealthDamage), Mathf.Max(0f, hpBefore));
-            float contribution = effectiveDamage / 3f;
-            if (contribution <= 0.0001f) return;
-
-            float share = contribution / effects.Count;
             for (int i = 0; i < effects.Count; i++)
             {
-                var effect = effects[i];
-                if (effect == null || effect.ProviderGuid == 0 || !IsPlayerTeam(effect.ProviderGuid)) continue;
-                var stats = GetOrCreate(effect.ProviderGuid);
-                stats.VulnerableDamage += share;
-                effect.Used = true;
+                ActiveEffect effect = effects[i];
+                if (effect == null || effect.ProviderGuid == 0) continue;
+
+                DamageAmplifierGroupKind kind = defaultGroupKind;
+                float bonusPct = Mathf.Max(0f, effect.DamageBonusPct);
+                if (effect.Kind == ContributionKind.Vulnerable)
+                {
+                    kind = DamageAmplifierGroupKind.TargetDamageTaken;
+                    if (bonusPct <= 0.0001f)
+                        bonusPct = GetVulnerableDamageBonusPct(effect.EffectId);
+                }
+                else if (IsCritTokenId(effect.EffectId))
+                {
+                    kind = DamageAmplifierGroupKind.Crit;
+                    if (bonusPct <= 0.0001f)
+                        bonusPct = GetCritDamageBonusPct(critScore);
+                }
+
+                if (bonusPct <= 0.0001f) continue;
+
+                DamageAmplifierGroup group = FindOrAddGroup(groups, kind);
+                group.Sources.Add(new DamageAmplifierSource
+                {
+                    Effect = effect,
+                    GroupKind = kind,
+                    BonusPct = bonusPct
+                });
             }
-            _snapshotDirty = true;
+
+            for (int i = 0; i < groups.Count; i++)
+            {
+                DamageAmplifierGroup group = groups[i];
+                if (group.Sources.Count == 0) continue;
+
+                if (group.Kind == DamageAmplifierGroupKind.Crit)
+                {
+                    float max = 0f;
+                    for (int sourceIndex = 0; sourceIndex < group.Sources.Count; sourceIndex++)
+                        max = Mathf.Max(max, group.Sources[sourceIndex].BonusPct);
+                    group.Multiplier = 1f + max;
+                }
+                else
+                {
+                    group.Multiplier = 1f + group.WeightSum;
+                }
+            }
+        }
+
+        private static DamageAmplifierGroup FindOrAddGroup(List<DamageAmplifierGroup> groups, DamageAmplifierGroupKind kind)
+        {
+            for (int i = 0; i < groups.Count; i++)
+            {
+                if (groups[i].Kind == kind) return groups[i];
+            }
+
+            var group = new DamageAmplifierGroup { Kind = kind };
+            groups.Add(group);
+            return group;
+        }
+
+        private static float[] CalculateShapleyGroupContributions(List<DamageAmplifierGroup> groups, float totalDamage, float effectiveDamage)
+        {
+            int count = groups.Count;
+            var contributions = new float[count];
+            if (count == 0) return contributions;
+
+            float trackedMultiplier = 1f;
+            for (int i = 0; i < count; i++)
+                trackedMultiplier *= Mathf.Max(0.0001f, groups[i].Multiplier);
+            if (trackedMultiplier <= 0.0001f) return contributions;
+
+            float baselineDamage = totalDamage / trackedMultiplier;
+            int subsetCount = 1 << count;
+            var values = new float[subsetCount];
+            for (int mask = 0; mask < subsetCount; mask++)
+            {
+                float multiplier = 1f;
+                for (int i = 0; i < count; i++)
+                {
+                    if ((mask & (1 << i)) != 0)
+                        multiplier *= Mathf.Max(0.0001f, groups[i].Multiplier);
+                }
+                values[mask] = Mathf.Min(baselineDamage * multiplier, effectiveDamage);
+            }
+
+            float factorialN = Factorial(count);
+            for (int i = 0; i < count; i++)
+            {
+                float contribution = 0f;
+                int bit = 1 << i;
+                for (int mask = 0; mask < subsetCount; mask++)
+                {
+                    if ((mask & bit) != 0) continue;
+                    int subsetSize = CountBits(mask);
+                    float weight = Factorial(subsetSize) * Factorial(count - subsetSize - 1) / factorialN;
+                    contribution += weight * (values[mask | bit] - values[mask]);
+                }
+                contributions[i] = Mathf.Max(0f, contribution);
+            }
+            return contributions;
+        }
+
+        private static int CountBits(int value)
+        {
+            int count = 0;
+            while (value != 0)
+            {
+                value &= value - 1;
+                count++;
+            }
+            return count;
+        }
+
+        private static float Factorial(int value)
+        {
+            float result = 1f;
+            for (int i = 2; i <= value; i++)
+                result *= i;
+            return result;
         }
 
         private void CacheFinalConsumedDamageEffects(EventSkillFinalizeResults evt)
@@ -655,39 +823,58 @@ namespace DD2DamageMeter
                 {
                     var token = tokenInstance?.Definition;
                     if (token == null) continue;
+                    uint tokenSourceGuid = tokenInstance.SourceActorGuid;
+                    string tokenSourceId = tokenInstance.SourceId ?? "";
+                    if (_floorEffectSources.TryGetSource(tokenInstance, out var tokenMarker))
+                    {
+                        tokenSourceGuid = tokenMarker.ProviderGuid;
+                        if (!string.IsNullOrEmpty(tokenMarker.SourceId))
+                            tokenSourceId = tokenMarker.SourceId;
+                    }
+                    else if (_floorEffectSources.TryResolveTokenSource(actorGuid, token.Id, tokenInstance.SourceType, tokenInstance.SourceId, out tokenMarker))
+                    {
+                        tokenSourceGuid = tokenMarker.ProviderGuid;
+                        if (!string.IsNullOrEmpty(tokenMarker.SourceId))
+                            tokenSourceId = tokenMarker.SourceId;
+                    }
+
                     if (IsVulnerableToken(token))
                     {
-                        if (!IsPlayerTeam(actorGuid) && IsPlayerTeam(tokenInstance.SourceActorGuid))
+                        if (!IsPlayerTeam(actorGuid) && IsPlayerTeam(tokenSourceGuid))
                         {
-                            AddPendingUnique(_pendingVulnerableEffects, actorGuid, new ActiveEffect
+                            var effect = new ActiveEffect
                             {
                                 TargetGuid = actorGuid,
-                                ProviderGuid = tokenInstance.SourceActorGuid,
+                                ProviderGuid = tokenSourceGuid,
                                 EffectId = token.Id ?? "",
-                                SourceId = tokenInstance.SourceId ?? "",
+                                SourceId = tokenSourceId,
                                 Kind = ContributionKind.Vulnerable,
                                 IsBuff = false
-                            });
+                            };
+                            ApplyFloorMarker(effect, tokenMarker);
+                            AddConsumedEffectFromSkillResult(_pendingVulnerableEffects, actorGuid, effect);
                         }
                         continue;
                     }
 
                     if (!IsPlayerTeam(actorGuid)) continue;
-                    float bonusPct = GetDamageBonusPct(token);
+                    float bonusPct = GetTokenContributionBonusPct(token);
                     if (bonusPct <= 0.0001f) continue;
-                    if (!IsDamageBonusToken(token) && bonusPct <= 0.0001f) continue;
-                    if (!IsEligibleFriendlyExternalSource(tokenInstance.SourceActorGuid, actorGuid)) continue;
+                    if (!IsDamageBonusToken(token) && !IsCritToken(token) && bonusPct <= 0.0001f) continue;
+                    if (!IsEligibleFriendlyExternalSource(tokenSourceGuid, actorGuid)) continue;
 
-                    AddPendingUnique(_pendingDamageEffects, actorGuid, new ActiveEffect
+                    var consumedEffect = new ActiveEffect
                     {
                         TargetGuid = actorGuid,
-                        ProviderGuid = tokenInstance.SourceActorGuid,
+                        ProviderGuid = tokenSourceGuid,
                         EffectId = token.Id ?? "",
-                        SourceId = tokenInstance.SourceId ?? "",
+                        SourceId = tokenSourceId,
                         Kind = ContributionKind.DamageBonus,
                         DamageBonusPct = bonusPct,
                         IsBuff = false
-                    });
+                    };
+                    ApplyFloorMarker(consumedEffect, tokenMarker);
+                    AddConsumedEffectFromSkillResult(_pendingDamageEffects, actorGuid, consumedEffect);
                 }
             }
         }
@@ -725,8 +912,12 @@ namespace DD2DamageMeter
             {
                 effects = GetActiveShieldEffectsForActor(targetGuid);
             }
-            if (effects.Count == 0)
-                effects = GetCurrentFloorShieldEffectsForActor(targetGuid);
+            else
+            {
+                var capped = new List<ActiveEffect>();
+                AddEffectsWithFloorCaps(capped, effects);
+                effects = capped;
+            }
 
             if (effects.Count == 0) return;
 
@@ -941,6 +1132,174 @@ namespace DD2DamageMeter
             return effective;
         }
 
+        private void TrackDotDamagePrevention(EventDotRemoved evt)
+        {
+            if (evt?.Actor == null || evt.Dot == null) return;
+            uint targetGuid = evt.Actor.ActorGuid;
+            uint sourceGuid = evt.SourceActorGuid;
+            string dotId = evt.Dot.m_Id ?? "";
+            string dotType = evt.Dot.m_Type ?? "";
+            ActiveDotSnapshot snapshot = PopActiveDotSnapshot(targetGuid, dotId, dotType);
+
+            if (snapshot == null) return;
+            if (snapshot.DamagePerTick <= 0.0001f || snapshot.RemainingTurns <= 0) return;
+            if (evt.Dot.IsHoT) return;
+            if (sourceGuid == 0 || !IsPlayerTeam(sourceGuid) || !IsPlayerTeam(targetGuid)) return;
+            if (!IsSkillSource(evt.Source, evt.SourceId)) return;
+
+            float prevented = snapshot.DamagePerTick * snapshot.RemainingTurns;
+            if (prevented <= 0.0001f) return;
+
+            var stats = GetOrCreate(sourceGuid);
+            stats.DotDamagePrevented += prevented;
+            _snapshotDirty = true;
+        }
+
+        private void SyncDotSnapshotsByGuid(uint actorGuid)
+        {
+            var actor = TryResolveActor(actorGuid);
+            if (actor != null) SyncDotSnapshots(actor);
+            else _activeDotSnapshots.Remove(actorGuid);
+        }
+
+        private void SyncDotSnapshots(ActorInstance actor)
+        {
+            if (actor == null || actor.ActorGuid == 0)
+                return;
+
+            uint targetGuid = actor.ActorGuid;
+            if (actor.TeamIndex != 0 || actor.DotContainer == null)
+            {
+                _activeDotSnapshots.Remove(targetGuid);
+                return;
+            }
+
+            var snapshots = new List<ActiveDotSnapshot>();
+            try
+            {
+                var dots = actor.DotContainer.GetInstances();
+                if (dots != null)
+                {
+                    foreach (var dot in dots)
+                    {
+                        if (dot?.Definition == null) continue;
+                        if (dot.Definition.IsHoT) continue;
+
+                        int remainingTurns = Mathf.Max(0, dot.GetDurationAmount());
+                        if (remainingTurns <= 0) continue;
+
+                        float damagePerTick = EstimateDotDamagePerTick(actor, dot);
+                        if (damagePerTick <= 0.0001f) continue;
+
+                        snapshots.Add(new ActiveDotSnapshot
+                        {
+                            TargetGuid = targetGuid,
+                            DotId = dot.Definition.m_Id ?? "",
+                            DotType = dot.Definition.m_Type ?? "",
+                            RemainingTurns = remainingTurns,
+                            DamagePerTick = damagePerTick
+                        });
+                    }
+                }
+            }
+            catch
+            {
+            }
+
+            if (snapshots.Count > 0)
+                _activeDotSnapshots[targetGuid] = snapshots;
+            else
+                _activeDotSnapshots.Remove(targetGuid);
+        }
+
+        private ActiveDotSnapshot PopActiveDotSnapshot(uint targetGuid, string dotId, string dotType)
+        {
+            if (!_activeDotSnapshots.TryGetValue(targetGuid, out var snapshots) || snapshots == null)
+                return null;
+
+            int fallbackIndex = -1;
+            for (int i = 0; i < snapshots.Count; i++)
+            {
+                var snapshot = snapshots[i];
+                if (snapshot == null) continue;
+
+                bool idMatches = !string.IsNullOrEmpty(snapshot.DotId) &&
+                                 !string.IsNullOrEmpty(dotId) &&
+                                 string.Equals(snapshot.DotId, dotId, StringComparison.OrdinalIgnoreCase);
+                bool typeMatches = DotTypeMatches(snapshot.DotType, dotType);
+                if (!idMatches && !typeMatches) continue;
+
+                if (idMatches)
+                {
+                    snapshots.RemoveAt(i);
+                    if (snapshots.Count == 0) _activeDotSnapshots.Remove(targetGuid);
+                    return snapshot;
+                }
+
+                if (fallbackIndex < 0) fallbackIndex = i;
+            }
+
+            if (fallbackIndex >= 0)
+            {
+                var snapshot = snapshots[fallbackIndex];
+                snapshots.RemoveAt(fallbackIndex);
+                if (snapshots.Count == 0) _activeDotSnapshots.Remove(targetGuid);
+                return snapshot;
+            }
+
+            return null;
+        }
+
+        private static float EstimateDotDamagePerTick(ActorInstance targetActor, DotInstance dot)
+        {
+            if (targetActor == null || dot?.Definition == null || dot.Definition.m_Effects == null)
+                return 0f;
+
+            float total = 0f;
+            foreach (var effect in dot.Definition.m_Effects)
+            {
+                if (effect == null || !effect.HasHealthDamage) continue;
+
+                float hpMax = 0f;
+                try
+                {
+                    hpMax = targetActor.GetHpMax(effect.m_IncludeWoundInMaxHp, false);
+                }
+                catch
+                {
+                    hpMax = 0f;
+                }
+
+                float damage = 0f;
+                damage += GetDotApplyValue(effect.m_HealthDamageAmount, effect.m_HealthDamageAmountRange, dot.m_EffectValueChange, dot.m_EffectValueMultiplier);
+
+                float damagePct = GetDotApplyValue(effect.m_HealthDamagePercent, effect.m_HealthDamagePercentRange, dot.m_EffectValueChange, dot.m_EffectValueMultiplier);
+                if (damagePct > 0f && hpMax > 0f)
+                    damage += hpMax * damagePct;
+
+                float downToPct = GetDotApplyValue(effect.m_HealthDamageDownToPercent, effect.m_HealthDamageDownToPercentRange, dot.m_EffectValueChange, dot.m_EffectValueMultiplier);
+                if (downToPct > 0f && hpMax > 0f)
+                    damage += Mathf.Max(targetActor.HpRaw - Assets.Code.Math.MathUtils.Round(downToPct * hpMax), 0f);
+
+                if (damage > 0f)
+                    total += Assets.Code.Math.MathUtils.Round(damage);
+            }
+
+            return Mathf.Max(0f, total);
+        }
+
+        private static float GetDotApplyValue(float effectValue, float effectRange, float valueChange, float valueMultiplier)
+        {
+            if (Mathf.Abs(effectValue) <= 0.000001f && effectRange <= 0f)
+                return 0f;
+
+            float value = effectValue + valueChange;
+            if (effectRange > 0f)
+                value += effectRange * 0.5f;
+
+            return value * valueMultiplier;
+        }
+
         private static void AddGuardedDot(List<GuardedDot> list, GuardedDot dot)
         {
             if (dot == null || dot.Count <= 0) return;
@@ -1090,45 +1449,316 @@ namespace DD2DamageMeter
         private List<ActiveEffect> GetDamageEffectsForActor(uint actorGuid)
         {
             var result = new List<ActiveEffect>();
+            bool hasPendingConsumedToken = false;
+            if (_pendingDamageEffects.TryGetValue(actorGuid, out var pending))
+            {
+                AddAmplifierEffectsWithConsumeCaps(result, pending);
+                hasPendingConsumedToken = pending.Count > 0;
+            }
+
+            List<ActiveEffect> active = null;
             for (int i = 0; i < _activeEffects.Count; i++)
             {
                 var effect = _activeEffects[i];
-                if (effect.TargetGuid == actorGuid && effect.Kind == ContributionKind.DamageBonus)
-                    result.Add(effect);
+                if (effect.TargetGuid == actorGuid &&
+                    effect.Kind == ContributionKind.DamageBonus &&
+                    (!hasPendingConsumedToken || (effect.IsBuff && !IsConsumeBuffOfPendingToken(effect, pending))))
+                {
+                    if (active == null) active = new List<ActiveEffect>();
+                    active.Add(effect);
+                }
             }
-            if (_pendingDamageEffects.TryGetValue(actorGuid, out var pending))
-                result.AddRange(pending);
+
+            AddAmplifierEffectsWithConsumeCaps(result, active);
             return result;
         }
 
         private List<ActiveEffect> GetVulnerableEffectsForTarget(uint actorGuid)
         {
             var result = new List<ActiveEffect>();
+            bool hasPendingConsumedToken = false;
             if (_pendingVulnerableEffects.TryGetValue(actorGuid, out var pending))
-                result.AddRange(pending);
-            if (result.Count > 0) return result;
+            {
+                AddAmplifierEffectsWithConsumeCaps(result, pending);
+                hasPendingConsumedToken = pending.Count > 0;
+            }
 
+            List<ActiveEffect> active = null;
             for (int i = 0; i < _activeEffects.Count; i++)
             {
                 var effect = _activeEffects[i];
-                if (effect.TargetGuid == actorGuid && effect.Kind == ContributionKind.Vulnerable)
+                if (effect.TargetGuid == actorGuid &&
+                    effect.Kind == ContributionKind.Vulnerable &&
+                    (!hasPendingConsumedToken || (effect.IsBuff && !IsConsumeBuffOfPendingToken(effect, pending))))
                 {
-                    result.Add(effect);
-                    break;
+                    if (active == null) active = new List<ActiveEffect>();
+                    active.Add(effect);
                 }
             }
+            AddAmplifierEffectsWithConsumeCaps(result, active);
             return result;
+        }
+
+        private static bool IsConsumeBuffOfPendingToken(ActiveEffect buffEffect, List<ActiveEffect> pendingTokens)
+        {
+            if (buffEffect == null || !buffEffect.IsBuff || pendingTokens == null || pendingTokens.Count == 0)
+                return false;
+
+            string buffId = buffEffect.EffectId ?? "";
+            if (string.IsNullOrEmpty(buffId)) return false;
+
+            for (int i = 0; i < pendingTokens.Count; i++)
+            {
+                var pending = pendingTokens[i];
+                if (pending == null || pending.IsBuff) continue;
+                var token = GetTokenDefinition(pending.EffectId);
+                if (token?.ConsumeBuffs == null) continue;
+
+                try
+                {
+                    foreach (var buff in token.ConsumeBuffs)
+                    {
+                        if (buff == null) continue;
+                        if (string.Equals(buff.Id ?? "", buffId, StringComparison.OrdinalIgnoreCase))
+                            return true;
+                    }
+                }
+                catch { }
+            }
+
+            return false;
+        }
+
+        private static void AddAmplifierEffectsWithConsumeCaps(List<ActiveEffect> result, List<ActiveEffect> effects)
+        {
+            if (result == null || effects == null || effects.Count == 0) return;
+
+            Dictionary<string, List<ActiveEffect>> capped = null;
+            List<ActiveEffect> uncapped = null;
+            for (int i = 0; i < effects.Count; i++)
+            {
+                var effect = effects[i];
+                if (!TryGetConsumeCapKey(effect, out var key))
+                {
+                    if (uncapped == null) uncapped = new List<ActiveEffect>();
+                    uncapped.Add(effect);
+                    continue;
+                }
+
+                if (capped == null)
+                    capped = new Dictionary<string, List<ActiveEffect>>(StringComparer.OrdinalIgnoreCase);
+                if (!capped.TryGetValue(key, out var list))
+                {
+                    list = new List<ActiveEffect>();
+                    capped[key] = list;
+                }
+                list.Add(effect);
+            }
+
+            AddEffectsWithFloorCaps(result, FilterTokenConsumeBuffDuplicates(uncapped, capped));
+
+            if (capped == null) return;
+
+            foreach (var kvp in capped)
+            {
+                var list = kvp.Value;
+                list.Sort(CompareConsumePriorityDescending);
+                int limit = GetConsumeCapLimit(list);
+                for (int i = 0; i < list.Count && i < limit; i++)
+                    result.Add(list[i]);
+            }
+        }
+
+        private static List<ActiveEffect> FilterTokenConsumeBuffDuplicates(
+            List<ActiveEffect> effects,
+            Dictionary<string, List<ActiveEffect>> cappedTokenEffects)
+        {
+            if (effects == null || effects.Count == 0 || cappedTokenEffects == null || cappedTokenEffects.Count == 0)
+                return effects;
+
+            List<ActiveEffect> filtered = null;
+            for (int i = 0; i < effects.Count; i++)
+            {
+                ActiveEffect effect = effects[i];
+                bool skip = effect != null && effect.IsBuff && IsConsumeBuffOfAnyToken(effect, cappedTokenEffects);
+                if (!skip)
+                {
+                    if (filtered != null)
+                        filtered.Add(effect);
+                    continue;
+                }
+
+                if (filtered == null)
+                {
+                    filtered = new List<ActiveEffect>();
+                    for (int j = 0; j < i; j++)
+                        filtered.Add(effects[j]);
+                }
+            }
+
+            return filtered ?? effects;
+        }
+
+        private static bool IsConsumeBuffOfAnyToken(ActiveEffect buffEffect, Dictionary<string, List<ActiveEffect>> cappedTokenEffects)
+        {
+            if (buffEffect == null || cappedTokenEffects == null) return false;
+            foreach (var kvp in cappedTokenEffects)
+            {
+                var tokens = kvp.Value;
+                if (tokens == null) continue;
+                for (int i = 0; i < tokens.Count; i++)
+                {
+                    if (IsConsumeBuffOfToken(buffEffect, tokens[i]))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static bool IsConsumeBuffOfToken(ActiveEffect buffEffect, ActiveEffect tokenEffect)
+        {
+            if (buffEffect == null || tokenEffect == null || !buffEffect.IsBuff || tokenEffect.IsBuff) return false;
+            if (buffEffect.TargetGuid != tokenEffect.TargetGuid) return false;
+            if (buffEffect.Kind != tokenEffect.Kind) return false;
+            if (buffEffect.ProviderGuid != 0 && tokenEffect.ProviderGuid != 0 && buffEffect.ProviderGuid != tokenEffect.ProviderGuid) return false;
+            if (buffEffect.IsFloor && tokenEffect.IsFloor &&
+                buffEffect.FloorPlacementId > 0 &&
+                tokenEffect.FloorPlacementId > 0 &&
+                buffEffect.FloorPlacementId != tokenEffect.FloorPlacementId) return false;
+
+            string buffId = buffEffect.EffectId ?? "";
+            if (string.IsNullOrEmpty(buffId)) return false;
+
+            var token = GetTokenDefinition(tokenEffect.EffectId);
+            if (token?.ConsumeBuffs == null) return false;
+            try
+            {
+                foreach (var buff in token.ConsumeBuffs)
+                {
+                    if (buff == null) continue;
+                    if (string.Equals(buff.Id ?? "", buffId, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static void AddEffectsWithFloorCaps(List<ActiveEffect> result, List<ActiveEffect> effects)
+        {
+            if (result == null || effects == null || effects.Count == 0) return;
+
+            HashSet<string> seenFloorEffects = null;
+            for (int i = 0; i < effects.Count; i++)
+            {
+                var effect = effects[i];
+                if (TryGetFloorCapKey(effect, out var key))
+                {
+                    if (seenFloorEffects == null)
+                        seenFloorEffects = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    if (!seenFloorEffects.Add(key))
+                        continue;
+                }
+
+                result.Add(effect);
+            }
+        }
+
+        private static bool TryGetConsumeCapKey(ActiveEffect effect, out string key)
+        {
+            key = null;
+            if (effect == null || effect.IsBuff) return false;
+            if (IsCritTokenId(effect.EffectId)) return false;
+
+            var token = GetTokenDefinition(effect.EffectId);
+            if (token == null) return false;
+
+            try
+            {
+                if (token.GetHasType(TokenType.SKILL_CALCULATE_DAMAGE_BUFF))
+                {
+                    key = effect.Kind == ContributionKind.Vulnerable
+                        ? "target:skill_calculate_damage_buff"
+                        : "performer:skill_calculate_damage_buff";
+                    return true;
+                }
+
+                if (token.GetHasType(TokenType.SKILL_DAMAGE_BUFF))
+                {
+                    key = effect.Kind == ContributionKind.Vulnerable
+                        ? "target:skill_damage_buff"
+                        : "performer:skill_damage_buff";
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
+        }
+
+        private static bool TryGetFloorCapKey(ActiveEffect effect, out string key)
+        {
+            key = null;
+            if (effect == null || !effect.IsFloor || effect.FloorPlacementId <= 0) return false;
+
+            key = string.Concat(
+                effect.FloorPlacementId.ToString(),
+                ":",
+                ((int)effect.Kind).ToString(),
+                ":",
+                effect.EffectId ?? "",
+                ":",
+                effect.SourceId ?? "");
+            return true;
+        }
+
+        private static int GetConsumeCapLimit(List<ActiveEffect> effects)
+        {
+            if (effects == null || effects.Count == 0) return 0;
+
+            int limit = 1;
+            for (int i = 0; i < effects.Count; i++)
+            {
+                var token = GetTokenDefinition(effects[i]?.EffectId);
+                if (token != null && token.m_ConsumeLimit > 0)
+                    limit = Math.Min(limit, token.m_ConsumeLimit);
+            }
+            return Math.Max(1, limit);
+        }
+
+        private static int CompareConsumePriorityDescending(ActiveEffect a, ActiveEffect b)
+        {
+            int priorityA = GetTokenConsumePriority(a?.EffectId);
+            int priorityB = GetTokenConsumePriority(b?.EffectId);
+            return priorityB.CompareTo(priorityA);
+        }
+
+        private static int GetTokenConsumePriority(string tokenId)
+        {
+            try
+            {
+                return GetTokenDefinition(tokenId)?.m_ConsumePriority ?? 0;
+            }
+            catch
+            {
+                return 0;
+            }
         }
 
         private List<ActiveEffect> GetActiveShieldEffectsForActor(uint actorGuid)
         {
-            var result = new List<ActiveEffect>();
+            var candidates = new List<ActiveEffect>();
             for (int i = 0; i < _activeEffects.Count; i++)
             {
                 var effect = _activeEffects[i];
                 if (effect.TargetGuid == actorGuid && effect.Kind == ContributionKind.Shield)
-                    result.Add(effect);
+                    candidates.Add(effect);
             }
+
+            var result = new List<ActiveEffect>();
+            AddEffectsWithFloorCaps(result, candidates);
             return result;
         }
 
@@ -1145,105 +1775,6 @@ namespace DD2DamageMeter
             return result;
         }
 
-        private List<ActiveEffect> GetCurrentFloorDamageEffectsForActor(uint actorGuid)
-        {
-            return GetCurrentFloorEffectsForActor(actorGuid, ContributionKind.DamageBonus);
-        }
-
-        private List<ActiveEffect> GetCurrentFloorShieldEffectsForActor(uint actorGuid)
-        {
-            return GetCurrentFloorEffectsForActor(actorGuid, ContributionKind.Shield);
-        }
-
-        private List<ActiveEffect> GetCurrentFloorEffectsForActor(uint actorGuid, ContributionKind kind)
-        {
-            var result = new List<ActiveEffect>();
-            try
-            {
-                var actor = TryResolveActor(actorGuid);
-                if (actor == null) return result;
-
-                var instances = actor.GetLockedTeamPositionActorContainerInstances();
-                if (instances == null || instances.Count == 0) return result;
-
-                for (int i = 0; i < instances.Count; i++)
-                {
-                    var instance = instances[i];
-                    if (instance == null || instance.LockedTeamPosition != actor.TeamPosition) continue;
-
-                    var token = instance.ActorContainerDefinition as TokenDefinition;
-                    var buff = instance.ActorContainerDefinition as BuffDefinition;
-                    string effectId = instance.ActorContainerDefinition?.Id ?? "";
-                    float bonusPct = 0f;
-                    bool matchesKind = false;
-
-                    if (kind == ContributionKind.DamageBonus)
-                    {
-                        bonusPct = token != null ? GetDamageBonusPct(token) : GetDamageBonusPct(buff);
-                        matchesKind = bonusPct > 0.0001f;
-                    }
-                    else if (kind == ContributionKind.Shield)
-                    {
-                        matchesKind = token != null ? IsShieldToken(token) : GetDamageReductionPct(buff) > 0.0001f;
-                    }
-
-                    if (!matchesKind) continue;
-
-                    if (!TryResolveFloorProviderForInstance(actor.ActorGuid, instance, token, buff, kind, out var providerGuid, out var sourceId))
-                        continue;
-
-                    result.Add(new ActiveEffect
-                    {
-                        TargetGuid = actor.ActorGuid,
-                        ProviderGuid = providerGuid,
-                        EffectId = effectId,
-                        SourceId = sourceId ?? "",
-                        Kind = kind,
-                        DamageBonusPct = bonusPct,
-                        IsBuff = buff != null
-                    });
-                    GetOrCreate(providerGuid);
-                }
-            }
-            catch { }
-            return result;
-        }
-
-        private bool TryResolveFloorProviderForInstance(uint actorGuid, IActorContainerInstance instance, TokenDefinition token, BuffDefinition buff, ContributionKind kind, out uint providerGuid, out string sourceId)
-        {
-            providerGuid = 0;
-            sourceId = instance?.SourceId ?? "";
-            if (instance == null) return false;
-
-            uint directGuid = GetSourceActorGuid(instance);
-            if (IsEligibleFriendlyExternalSource(directGuid, actorGuid))
-            {
-                providerGuid = directGuid;
-                return true;
-            }
-
-            bool isDamageBonus = kind == ContributionKind.DamageBonus;
-            bool isShield = kind == ContributionKind.Shield;
-
-            if (token != null &&
-                TryResolveFloorTokenSource(actorGuid, token.Id, instance.SourceType, instance.SourceId, isDamageBonus, isShield, out var floorTokenGuid, out var floorTokenSourceId))
-            {
-                providerGuid = floorTokenGuid;
-                if (!string.IsNullOrEmpty(floorTokenSourceId)) sourceId = floorTokenSourceId;
-                return IsEligibleFriendlyExternalSource(providerGuid, actorGuid);
-            }
-
-            if (buff != null &&
-                TryResolveFloorBuffSource(actorGuid, buff.Id, instance.SourceType, instance.SourceId, isDamageBonus, isShield, out var floorBuffGuid, out var floorBuffSourceId))
-            {
-                providerGuid = floorBuffGuid;
-                if (!string.IsNullOrEmpty(floorBuffSourceId)) sourceId = floorBuffSourceId;
-                return IsEligibleFriendlyExternalSource(providerGuid, actorGuid);
-            }
-
-            return false;
-        }
-
         private void MarkPendingShieldsUsed(uint actorGuid)
         {
             if (!_pendingShieldEffects.TryGetValue(actorGuid, out var effects)) return;
@@ -1251,9 +1782,17 @@ namespace DD2DamageMeter
                 effects[i].Used = true;
         }
 
-        private void AddActiveEffect(uint targetGuid, uint providerGuid, string effectId, string sourceId, ContributionKind kind, float damageBonusPct, bool isBuff)
+        private void AddActiveEffect(
+            uint targetGuid,
+            uint providerGuid,
+            string effectId,
+            string sourceId,
+            ContributionKind kind,
+            float damageBonusPct,
+            bool isBuff,
+            FloorEffectSourceTracker.SourceMarker floorMarker = null)
         {
-            _activeEffects.Add(new ActiveEffect
+            var effect = new ActiveEffect
             {
                 TargetGuid = targetGuid,
                 ProviderGuid = providerGuid,
@@ -1262,12 +1801,25 @@ namespace DD2DamageMeter
                 Kind = kind,
                 DamageBonusPct = damageBonusPct,
                 IsBuff = isBuff
-            });
+            };
+            ApplyFloorMarker(effect, floorMarker);
+            _activeEffects.Add(effect);
             GetOrCreate(providerGuid);
             _snapshotDirty = true;
         }
 
-        private ActiveEffect PopActiveEffect(uint targetGuid, string effectId, ContributionKind kind)
+        private static void ApplyFloorMarker(ActiveEffect effect, FloorEffectSourceTracker.SourceMarker marker)
+        {
+            if (effect == null || marker == null || marker.ProviderGuid == 0) return;
+            effect.IsFloor = marker.PlacementId > 0;
+            effect.FloorPlacementId = marker.PlacementId;
+            if (effect.ProviderGuid == 0)
+                effect.ProviderGuid = marker.ProviderGuid;
+            if (string.IsNullOrEmpty(effect.SourceId))
+                effect.SourceId = !string.IsNullOrEmpty(marker.SourceId) ? marker.SourceId : marker.SkillId;
+        }
+
+        private ActiveEffect PopActiveEffect(uint targetGuid, string effectId, ContributionKind kind, bool allowFallback = true)
         {
             for (int i = 0; i < _activeEffects.Count; i++)
             {
@@ -1277,6 +1829,9 @@ namespace DD2DamageMeter
                 _activeEffects.RemoveAt(i);
                 return effect;
             }
+
+            if (!allowFallback)
+                return null;
 
             for (int i = 0; i < _activeEffects.Count; i++)
             {
@@ -1290,6 +1845,32 @@ namespace DD2DamageMeter
             return null;
         }
 
+        private ActiveEffect PopActiveEffect(uint targetGuid, string effectId, ContributionKind kind, uint providerGuid, string sourceId)
+        {
+            for (int i = 0; i < _activeEffects.Count; i++)
+            {
+                var effect = _activeEffects[i];
+                if (effect.TargetGuid != targetGuid || effect.Kind != kind) continue;
+                if (providerGuid != 0 && effect.ProviderGuid != providerGuid) continue;
+                if (!string.Equals(effect.EffectId ?? "", effectId ?? "", StringComparison.OrdinalIgnoreCase)) continue;
+                if (!SourceIdMatches(effect.SourceId, sourceId)) continue;
+                _activeEffects.RemoveAt(i);
+                return effect;
+            }
+
+            for (int i = 0; i < _activeEffects.Count; i++)
+            {
+                var effect = _activeEffects[i];
+                if (effect.TargetGuid != targetGuid || effect.Kind != kind) continue;
+                if (providerGuid != 0 && effect.ProviderGuid != providerGuid) continue;
+                if (!string.Equals(effect.EffectId ?? "", effectId ?? "", StringComparison.OrdinalIgnoreCase)) continue;
+                _activeEffects.RemoveAt(i);
+                return effect;
+            }
+
+            return null;
+        }
+
         private static void AddPending(Dictionary<uint, List<ActiveEffect>> map, uint actorGuid, ActiveEffect effect)
         {
             if (!map.TryGetValue(actorGuid, out var list))
@@ -1298,6 +1879,38 @@ namespace DD2DamageMeter
                 map[actorGuid] = list;
             }
             list.Add(effect);
+        }
+
+        private void AddConsumedEffectFromSkillResult(Dictionary<uint, List<ActiveEffect>> map, uint actorGuid, ActiveEffect effect)
+        {
+            if (effect == null) return;
+            if (map.TryGetValue(actorGuid, out var list) && HasEquivalentEffect(list, effect)) return;
+
+            ActiveEffect active = PopActiveEffect(
+                effect.TargetGuid,
+                effect.EffectId,
+                effect.Kind,
+                effect.ProviderGuid,
+                effect.SourceId);
+
+            if (active != null)
+            {
+                if (active.DamageBonusPct <= 0.0001f)
+                    active.DamageBonusPct = effect.DamageBonusPct;
+                if (active.ProviderGuid == 0)
+                    active.ProviderGuid = effect.ProviderGuid;
+                if (string.IsNullOrEmpty(active.SourceId))
+                    active.SourceId = effect.SourceId;
+                if (!active.IsFloor && effect.IsFloor)
+                {
+                    active.IsFloor = true;
+                    active.FloorPlacementId = effect.FloorPlacementId;
+                }
+                AddPending(map, actorGuid, active);
+                return;
+            }
+
+            AddPending(map, actorGuid, effect);
         }
 
         private void AddPendingUnique(Dictionary<uint, List<ActiveEffect>> map, uint actorGuid, ActiveEffect effect)
@@ -1324,6 +1937,11 @@ namespace DD2DamageMeter
             if (existing.TargetGuid != candidate.TargetGuid) return false;
             if (existing.ProviderGuid != candidate.ProviderGuid) return false;
             if (existing.Kind != candidate.Kind) return false;
+            if (existing.IsFloor || candidate.IsFloor)
+            {
+                if (existing.IsFloor != candidate.IsFloor) return false;
+                if (existing.FloorPlacementId != candidate.FloorPlacementId) return false;
+            }
 
             string existingEffectId = existing.EffectId ?? "";
             string candidateEffectId = candidate.EffectId ?? "";
@@ -1367,6 +1985,7 @@ namespace DD2DamageMeter
                 VulnerableDamage = s.VulnerableDamage,
                 ShieldPrevented = s.ShieldPrevented,
                 GuardProtected = s.GuardProtected,
+                DotDamagePrevented = s.DotDamagePrevented,
                 ShieldWasted = s.ShieldWasted,
                 ComboApplied = s.ComboApplied,
                 ComboConsumed = s.ComboConsumed
@@ -1484,6 +2103,13 @@ namespace DD2DamageMeter
                 sourceId = resolvedSourceId ?? sourceId;
             }
 
+            if (sourceGuid == 0 &&
+                _floorEffectSources.TryResolveTokenSource(targetGuid, evt.m_TokenId, evt.m_SourceType, evt.m_SourceId, out var floorMarker))
+            {
+                sourceGuid = floorMarker.ProviderGuid;
+                if (!string.IsNullOrEmpty(floorMarker.SourceId)) sourceId = floorMarker.SourceId;
+            }
+
             if (sourceGuid == 0 || !IsPlayerTeam(sourceGuid)) return;
 
             int amount = Math.Max(1, evt.m_AddAmount);
@@ -1502,9 +2128,13 @@ namespace DD2DamageMeter
             // Re-applying Vulnerable can remove one instance after the token limit is
             // enforced. If a Vulnerable token still remains, keep attribution aligned
             // with the surviving token instance instead of dropping the contribution.
-            if (TryResolveTokenSource(targetGuid, evt.Token.Id, evt.Source, evt.SourceId, out var sourceGuid, out var sourceId) &&
-                sourceGuid != 0 &&
-                IsPlayerTeam(sourceGuid))
+            bool resolved = _floorEffectSources.TryResolveTokenSource(targetGuid, evt.Token.Id, evt.Source, evt.SourceId, out var floorMarker);
+            uint sourceGuid = resolved ? floorMarker.ProviderGuid : 0;
+            string sourceId = resolved ? floorMarker.SourceId : evt.SourceId;
+            if (!resolved)
+                resolved = TryResolveTokenSource(targetGuid, evt.Token.Id, evt.Source, evt.SourceId, out sourceGuid, out sourceId);
+
+            if (resolved && sourceGuid != 0 && IsPlayerTeam(sourceGuid))
             {
                 AddActiveEffect(targetGuid, sourceGuid, evt.Token.Id, sourceId, ContributionKind.Vulnerable, 0f, false);
             }
@@ -1536,6 +2166,13 @@ namespace DD2DamageMeter
             {
                 sourceGuid = resolvedGuid;
                 sourceId = resolvedSourceId ?? sourceId;
+            }
+
+            if (sourceGuid == 0 &&
+                _floorEffectSources.TryResolveTokenSource(targetGuid, evt.m_TokenId, evt.m_SourceType, evt.m_SourceId, out var floorMarker))
+            {
+                sourceGuid = floorMarker.ProviderGuid;
+                if (!string.IsNullOrEmpty(floorMarker.SourceId)) sourceId = floorMarker.SourceId;
             }
 
             if (sourceGuid == 0 || !IsPlayerTeam(sourceGuid)) return;
@@ -1684,541 +2321,27 @@ namespace DD2DamageMeter
                    string.Equals(hintSourceId, eventSourceId, StringComparison.OrdinalIgnoreCase);
         }
 
-        private void RecordFloorContributionSources(EventSkillFinalizeResults evt)
+        private static int GetActorResultCritScore(Assets.Code.Skill.SkillCalculation.ActorResult actorResult)
         {
             try
             {
-                if (evt?.ActorResults == null) return;
-                string skillId = evt.SkillId ?? "";
-
-                foreach (var ar in evt.ActorResults)
-                {
-                    if (ar?.m_AppliedEffectsOutputContainer == null) continue;
-
-                    foreach (var output in ar.m_AppliedEffectsOutputContainer.Outputs)
-                    {
-                        if (output == null || output.m_TargetActor == null) continue;
-                        var targetActor = output.m_TargetActor;
-                        if (!IsPlayerTeam(targetActor.ActorGuid)) continue;
-
-                        uint providerGuid = output.m_PerformerActor != null
-                            ? output.m_PerformerActor.ActorGuid
-                            : ar.m_PerformerActorGuid;
-                        if (providerGuid == 0 || !IsPlayerTeam(providerGuid)) continue;
-
-                        foreach (var effect in output.EffectInstancesToApply)
-                        {
-                            var def = effect?.EffectDefinition;
-                            if (def == null || !def.m_IsLockedTeamPosition) continue;
-
-                            string sourceId = !string.IsNullOrEmpty(effect.SourceId) ? effect.SourceId : skillId;
-                            if (!TryCreateFloorSource(
-                                    targetActor.ActorGuid,
-                                    providerGuid,
-                                    targetActor.TeamIndex,
-                                    targetActor.TeamPosition,
-                                    def,
-                                    sourceId,
-                                    skillId,
-                                    out var floorSource))
-                            {
-                                continue;
-                            }
-
-                            AddOrUpdateFloorSource(floorSource);
-                        }
-                    }
-                }
+                if (actorResult == null || !actorResult.IsCrit) return 0;
+                EnsureActorResultCritReflection();
+                var crit = _actorResultCritField?.GetValue(actorResult) as Assets.Code.Skill.SkillCalculation.ActorResult.Crit;
+                return Mathf.Max(crit?.m_CritScore ?? 1, 1);
             }
-            catch { }
-        }
-
-        private void AddOrUpdateFloorSource(uint targetGuid, uint providerGuid, BuffDefinition buff, string sourceId)
-        {
-            var actor = TryResolveActor(targetGuid);
-            int teamIndex = actor != null ? actor.TeamIndex : -1;
-            int teamPosition = actor != null ? actor.TeamPosition : -1;
-            if (!TryCreateFloorSource(targetGuid, providerGuid, teamIndex, teamPosition, buff, sourceId, out var floorSource)) return;
-            AddOrUpdateFloorSource(floorSource);
-        }
-
-        private void AddOrUpdateFloorSource(FloorSource floorSource)
-        {
-            if (floorSource == null || floorSource.ProviderGuid == 0) return;
-            for (int i = _floorSources.Count - 1; i >= 0; i--)
+            catch
             {
-                if (IsSameFloorPlacement(_floorSources[i], floorSource))
-                    _floorSources.RemoveAt(i);
-            }
-            _floorSources.Add(floorSource);
-            GetOrCreate(floorSource.ProviderGuid);
-        }
-
-        private void RemoveFloorSource(uint targetGuid, string buffId)
-        {
-            for (int i = _floorSources.Count - 1; i >= 0; i--)
-            {
-                var floorSource = _floorSources[i];
-                if (!string.Equals(floorSource.BuffId ?? "", buffId ?? "", StringComparison.OrdinalIgnoreCase)) continue;
-                if (floorSource.TargetGuid == targetGuid)
-                {
-                    _floorSources.RemoveAt(i);
-                    continue;
-                }
-
-                var actor = TryResolveActor(targetGuid);
-                if (actor != null &&
-                    floorSource.TeamIndex == actor.TeamIndex &&
-                    floorSource.TeamPosition == actor.TeamPosition)
-                {
-                    _floorSources.RemoveAt(i);
-                }
+                return actorResult != null && actorResult.IsCrit ? 1 : 0;
             }
         }
 
-        private bool TryResolveFloorTokenSource(uint targetGuid, string tokenId, SourceType eventSourceType, string eventSourceId, bool isDamageBonus, bool isShield, out uint providerGuid, out string sourceId)
+        private static void EnsureActorResultCritReflection()
         {
-            providerGuid = 0;
-            sourceId = "";
-            var token = GetTokenDefinition(tokenId);
-
-            for (int i = _floorSources.Count - 1; i >= 0; i--)
-            {
-                var floorSource = _floorSources[i];
-                var actor = TryResolveActor(targetGuid);
-                if (!FloorSourceMatchesCurrentActor(floorSource, actor, targetGuid)) continue;
-                if (actor != null && floorSource.TeamPosition >= 0 && !HasLiveFloorInstance(actor, floorSource)) continue;
-                bool sourceMatches = FloorEventMatches(floorSource, eventSourceType, eventSourceId);
-
-                bool matchesDamage = isDamageBonus &&
-                                     (FloorSourceMatchesToken(floorSource.DamageTokenIds, floorSource.DamageTokenTags, token, tokenId) ||
-                                      (sourceMatches && IsKnownFloorSource(floorSource)));
-                bool matchesShield = isShield &&
-                                     (FloorSourceMatchesToken(floorSource.ShieldTokenIds, floorSource.ShieldTokenTags, token, tokenId) ||
-                                      (sourceMatches && IsKnownFloorSource(floorSource)));
-                if (!matchesDamage && !matchesShield) continue;
-
-                providerGuid = floorSource.ProviderGuid;
-                sourceId = floorSource.SourceId ?? "";
-                return providerGuid != 0;
-            }
-
-            return false;
-        }
-
-        private bool TryResolveFloorBuffSource(uint targetGuid, string buffId, SourceType eventSourceType, string eventSourceId, bool isDamageBonus, bool isShield, out uint providerGuid, out string sourceId)
-        {
-            providerGuid = 0;
-            sourceId = "";
-
-            for (int i = _floorSources.Count - 1; i >= 0; i--)
-            {
-                var floorSource = _floorSources[i];
-                var actor = TryResolveActor(targetGuid);
-                if (!FloorSourceMatchesCurrentActor(floorSource, actor, targetGuid)) continue;
-                if (actor != null && floorSource.TeamPosition >= 0 && !HasLiveFloorInstance(actor, floorSource)) continue;
-                bool sourceMatches = FloorEventMatches(floorSource, eventSourceType, eventSourceId);
-
-                bool matchesDamage = isDamageBonus &&
-                                     (ContainsIgnoreCase(floorSource.DamageBuffIds, buffId) ||
-                                      (sourceMatches && IsKnownFloorSource(floorSource)));
-                bool matchesShield = isShield &&
-                                     (ContainsIgnoreCase(floorSource.ShieldBuffIds, buffId) ||
-                                      (sourceMatches && IsKnownFloorSource(floorSource)));
-                if (!matchesDamage && !matchesShield) continue;
-
-                providerGuid = floorSource.ProviderGuid;
-                sourceId = floorSource.SourceId ?? "";
-                return providerGuid != 0;
-            }
-
-            return false;
-        }
-
-        private static bool TryCreateFloorSource(uint targetGuid, uint providerGuid, int teamIndex, int teamPosition, BuffDefinition buff, string sourceId, out FloorSource floorSource)
-        {
-            floorSource = null;
-            if (targetGuid == 0 || providerGuid == 0 || buff == null) return false;
-
-            var created = new FloorSource
-            {
-                TargetGuid = targetGuid,
-                ProviderGuid = providerGuid,
-                TeamIndex = teamIndex,
-                TeamPosition = teamPosition,
-                BuffId = buff.Id ?? "",
-                SourceId = sourceId ?? "",
-                DirectDamageBonus = GetDamageBonusPct(buff) > 0.0001f,
-                DirectShield = GetDamageReductionPct(buff) > 0.0001f
-            };
-
-            CollectFloorSourceCapabilities(created, buff);
-            if (!FloorSourceHasContribution(created) && !IsKnownFloorSource(created)) return false;
-
-            floorSource = created;
-            return true;
-        }
-
-        private static bool TryCreateFloorSource(uint targetGuid, uint providerGuid, int teamIndex, int teamPosition, EffectDefinition effect, string sourceId, string skillId, out FloorSource floorSource)
-        {
-            floorSource = null;
-            if (targetGuid == 0 || providerGuid == 0 || effect == null) return false;
-
-            var created = new FloorSource
-            {
-                TargetGuid = targetGuid,
-                ProviderGuid = providerGuid,
-                TeamIndex = teamIndex,
-                TeamPosition = teamPosition,
-                BuffId = "",
-                SkillId = skillId ?? "",
-                SourceId = sourceId ?? ""
-            };
-            AddUnique(created.FloorEffectIds, effect.m_Id);
-
-            if (effect.m_TokenAddAmount > 0 || effect.m_TokenAddAmountRange > 0)
-                RegisterFloorTokenCapability(created, effect.m_TokenAddId, effect.m_TokenAddTag);
-            if (effect.m_TokenConvertAmount > 0 || effect.m_TokenConvertAmountRange > 0)
-                RegisterFloorTokenCapability(created, effect.m_TokenConvertToId, null);
-
-            foreach (var addedBuff in effect.Buffs)
-            {
-                if (addedBuff == null) continue;
-                if (string.IsNullOrEmpty(created.BuffId))
-                    created.BuffId = addedBuff.Id ?? "";
-
-                float damagePct = GetDamageBonusPct(addedBuff);
-                float reductionPct = GetDamageReductionPct(addedBuff);
-                created.DirectDamageBonus |= damagePct > 0.0001f;
-                created.DirectShield |= reductionPct > 0.0001f;
-
-                if (damagePct > 0.0001f)
-                    AddUnique(created.DamageBuffIds, addedBuff.Id);
-                if (reductionPct > 0.0001f)
-                    AddUnique(created.ShieldBuffIds, addedBuff.Id);
-
-                CollectFloorSourceCapabilities(created, addedBuff);
-            }
-
-            if (!FloorSourceHasContribution(created) && !IsKnownFloorSource(created)) return false;
-
-            floorSource = created;
-            return true;
-        }
-
-        private static bool IsSameFloorPlacement(FloorSource existing, FloorSource candidate)
-        {
-            if (existing == null || candidate == null) return false;
-            bool samePosition = existing.TeamIndex >= 0 &&
-                                candidate.TeamIndex >= 0 &&
-                                existing.TeamIndex == candidate.TeamIndex &&
-                                existing.TeamPosition == candidate.TeamPosition;
-            bool sameTarget = existing.TeamIndex < 0 &&
-                              candidate.TeamIndex < 0 &&
-                              existing.TargetGuid == candidate.TargetGuid;
-            if (!samePosition && !sameTarget) return false;
-
-            if (NonEmptyIdMatches(existing.BuffId, candidate.BuffId)) return true;
-            if (NonEmptyListMatches(existing.FloorEffectIds, candidate.FloorEffectIds)) return true;
-            if (NonEmptyIdMatches(existing.SourceId, candidate.SourceId)) return true;
-            return IsKnownFloorSource(existing) && IsKnownFloorSource(candidate);
-        }
-
-        private static bool FloorSourceMatchesCurrentActor(FloorSource floorSource, ActorInstance actor, uint targetGuid)
-        {
-            if (floorSource == null) return false;
-            if (floorSource.TeamIndex >= 0 && floorSource.TeamPosition >= 0)
-            {
-                return actor != null &&
-                       actor.TeamIndex == floorSource.TeamIndex &&
-                       actor.TeamPosition == floorSource.TeamPosition;
-            }
-            return floorSource.TargetGuid == targetGuid;
-        }
-
-        private static bool HasLiveFloorInstance(ActorInstance actor, FloorSource floorSource)
-        {
-            try
-            {
-                if (actor == null || floorSource == null) return false;
-                IReadOnlyList<IActorContainerInstance> instances = actor.GetLockedTeamPositionActorContainerInstances();
-                if (instances == null || instances.Count == 0) return false;
-
-                for (int i = 0; i < instances.Count; i++)
-                {
-                    var instance = instances[i];
-                    if (instance == null || instance.LockedTeamPosition != floorSource.TeamPosition) continue;
-
-                    string instanceId = instance.ActorContainerDefinition?.Id ?? "";
-                    string instanceSourceId = instance.SourceId ?? "";
-                    uint instanceSourceGuid = GetSourceActorGuid(instance);
-                    bool sameProvider = instanceSourceGuid == 0 ||
-                                        floorSource.ProviderGuid == 0 ||
-                                        instanceSourceGuid == floorSource.ProviderGuid;
-                    if (!sameProvider) continue;
-
-                    if (NonEmptyIdMatches(instanceId, floorSource.BuffId) ||
-                        NonEmptyIdMatches(instanceSourceId, floorSource.SourceId) ||
-                        NonEmptyIdMatches(instanceSourceId, floorSource.SkillId) ||
-                        ContainsIgnoreCase(floorSource.FloorEffectIds, instanceId) ||
-                        ContainsIgnoreCase(floorSource.FloorEffectIds, instanceSourceId))
-                    {
-                        return true;
-                    }
-
-                    if (IsKnownFloorSource(floorSource) &&
-                        (IsKnownFloorId(instanceId) || IsKnownFloorId(instanceSourceId) || sameProvider))
-                    {
-                        return true;
-                    }
-                }
-            }
-            catch { }
-            return false;
-        }
-
-        private static uint GetSourceActorGuid(IActorContainerInstance instance)
-        {
-            try
-            {
-                var prop = instance?.GetType().GetProperty("SourceActorGuid");
-                if (prop == null) return 0;
-                object value = prop.GetValue(instance, null);
-                return value is uint guid ? guid : 0;
-            }
-            catch { return 0; }
-        }
-
-        private static void CollectFloorSourceCapabilities(FloorSource floorSource, BuffDefinition buff)
-        {
-            try
-            {
-                var actorDataEffects = buff?.ActorDataEffects;
-                if (actorDataEffects == null) return;
-
-                foreach (var effectGroup in actorDataEffects.EffectGroups)
-                {
-                    if (effectGroup == null || effectGroup.SourceEffects == null) continue;
-                    foreach (var sourceEffect in effectGroup.SourceEffects)
-                    {
-                        var effect = sourceEffect?.Definition;
-                        if (effect == null) continue;
-
-                        if (effect.m_TokenAddAmount > 0 || effect.m_TokenAddAmountRange > 0)
-                            RegisterFloorTokenCapability(floorSource, effect.m_TokenAddId, effect.m_TokenAddTag);
-                        if (effect.m_TokenConvertAmount > 0 || effect.m_TokenConvertAmountRange > 0)
-                            RegisterFloorTokenCapability(floorSource, effect.m_TokenConvertToId, null);
-
-                        foreach (var addedBuff in effect.Buffs)
-                        {
-                            if (addedBuff == null) continue;
-                            if (GetDamageBonusPct(addedBuff) > 0.0001f)
-                                AddUnique(floorSource.DamageBuffIds, addedBuff.Id);
-                            if (GetDamageReductionPct(addedBuff) > 0.0001f)
-                                AddUnique(floorSource.ShieldBuffIds, addedBuff.Id);
-                        }
-                    }
-                }
-            }
-            catch { }
-        }
-
-        private static void RegisterFloorTokenCapability(FloorSource floorSource, string tokenId, string tokenTag)
-        {
-            if (!string.IsNullOrEmpty(tokenId))
-            {
-                var token = GetTokenDefinition(tokenId);
-                if (IsDamageBonusToken(token) || GetDamageBonusPct(token) > 0.0001f)
-                    AddUnique(floorSource.DamageTokenIds, tokenId);
-                if (IsShieldToken(token))
-                    AddUnique(floorSource.ShieldTokenIds, tokenId);
-            }
-
-            if (!string.IsNullOrEmpty(tokenTag))
-            {
-                bool damageTag = false;
-                bool shieldTag = false;
-                try
-                {
-                    var tokens = SingletonMonoBehaviour<Library<string, TokenDefinition>>.Instance?.GetLibraryElements();
-                    if (tokens != null)
-                    {
-                        foreach (var token in tokens)
-                        {
-                            if (!TokenHasTag(token, tokenTag)) continue;
-                            damageTag |= IsDamageBonusToken(token) || GetDamageBonusPct(token) > 0.0001f;
-                            shieldTag |= IsShieldToken(token);
-                        }
-                    }
-                }
-                catch { }
-
-                string lowerTag = tokenTag.ToLowerInvariant();
-                damageTag |= lowerTag.Contains("strength") || lowerTag.Contains("damage");
-                shieldTag |= lowerTag.Contains("block");
-
-                if (damageTag) AddUnique(floorSource.DamageTokenTags, tokenTag);
-                if (shieldTag) AddUnique(floorSource.ShieldTokenTags, tokenTag);
-            }
-        }
-
-        private static bool FloorSourceHasContribution(FloorSource floorSource)
-        {
-            return floorSource.DirectDamageBonus ||
-                   floorSource.DirectShield ||
-                   floorSource.DamageTokenIds.Count > 0 ||
-                   floorSource.DamageTokenTags.Count > 0 ||
-                   floorSource.DamageBuffIds.Count > 0 ||
-                   floorSource.ShieldTokenIds.Count > 0 ||
-                   floorSource.ShieldTokenTags.Count > 0 ||
-                   floorSource.ShieldBuffIds.Count > 0;
-        }
-
-        private static bool FloorSourceMatchesToken(List<string> tokenIds, List<string> tokenTags, TokenDefinition token, string tokenId)
-        {
-            if (ContainsIgnoreCase(tokenIds, tokenId)) return true;
-            for (int i = 0; i < tokenTags.Count; i++)
-            {
-                if (TokenHasTag(token, tokenTags[i])) return true;
-            }
-            return false;
-        }
-
-        private static bool TryResolveLockedBuffSource(uint actorGuid, string buffId, out uint providerGuid, out string sourceId)
-        {
-            providerGuid = 0;
-            sourceId = "";
-            try
-            {
-                var actor = TryResolveActor(actorGuid);
-                if (actor?.BuffContainer == null) return false;
-
-                var buffInstance = FindNewestBuffInstance(actor, buffId, true);
-                if (buffInstance == null) return false;
-
-                providerGuid = buffInstance.SourceActorGuid;
-                sourceId = buffInstance.SourceId ?? "";
-                return true;
-            }
-            catch { return false; }
-        }
-
-        private static BuffInstance FindNewestBuffInstance(ActorInstance actor, string buffId, bool requireLocked)
-        {
-            try
-            {
-                var instances = actor.BuffContainer.GetInstances(buff =>
-                    buff != null &&
-                    buff.Definition != null &&
-                    string.Equals(buff.Definition.Id ?? "", buffId ?? "", StringComparison.OrdinalIgnoreCase) &&
-                    (!requireLocked || buff.IsLockedTeamPosition));
-
-                if (instances != null && instances.Count > 0)
-                    return instances[instances.Count - 1];
-            }
-            catch { }
-            return null;
-        }
-
-        private static bool TokenHasTag(TokenDefinition token, string tag)
-        {
-            if (token == null || token.Tags == null || string.IsNullOrEmpty(tag)) return false;
-            for (int i = 0; i < token.Tags.Count; i++)
-            {
-                if (string.Equals(token.Tags[i] ?? "", tag, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-            return false;
-        }
-
-        private static bool IsKnownFloorSource(FloorSource floorSource)
-        {
-            string id = ((floorSource.BuffId ?? "") + " " +
-                         (floorSource.SkillId ?? "") + " " +
-                         (floorSource.SourceId ?? "") + " " +
-                         string.Join(" ", floorSource.FloorEffectIds.ToArray())).ToLowerInvariant();
-            return id.Contains("consecration") ||
-                   id.Contains("consecrate") ||
-                   id.Contains("fortitude") ||
-                   IsKnownLightFloorId(id);
-        }
-
-        private static bool FloorEventMatches(FloorSource floorSource, SourceType eventSourceType, string eventSourceId)
-        {
-            if (floorSource == null) return false;
-            if (!string.IsNullOrEmpty(eventSourceId))
-            {
-                if (!string.IsNullOrEmpty(floorSource.SourceId) && SourceIdMatches(floorSource.SourceId, eventSourceId))
-                    return true;
-                if (NonEmptyIdMatches(floorSource.BuffId, eventSourceId) ||
-                    NonEmptyIdMatches(floorSource.SkillId, eventSourceId) ||
-                    ContainsIgnoreCase(floorSource.FloorEffectIds, eventSourceId))
-                {
-                    return true;
-                }
-                return IsKnownFloorId(eventSourceId);
-            }
-
-            return IsSourceType(eventSourceType, "locked_team_position_transfer") ||
-                   IsSourceType(eventSourceType, "buff") ||
-                   IsSourceType(eventSourceType, "skill_buff");
-        }
-
-        private static bool IsKnownFloorId(string id)
-        {
-            if (string.IsNullOrEmpty(id)) return false;
-            string lower = id.ToLowerInvariant();
-            return lower.Contains("consecration") ||
-                   lower.Contains("consecrate") ||
-                   lower.Contains("fortitude") ||
-                   IsKnownLightFloorId(lower);
-        }
-
-        private static bool IsKnownLightFloorId(string lowerId)
-        {
-            if (string.IsNullOrEmpty(lowerId)) return false;
-            string normalized = lowerId.Replace('_', ' ').Replace('-', ' ');
-            return string.Equals(lowerId, "light", StringComparison.OrdinalIgnoreCase) ||
-                   lowerId.EndsWith("_light", StringComparison.OrdinalIgnoreCase) ||
-                   lowerId.Contains("_light_") ||
-                   lowerId.EndsWith("-light", StringComparison.OrdinalIgnoreCase) ||
-                   lowerId.Contains("-light-") ||
-                   normalized.Contains("blessing light") ||
-                   normalized.Contains("blessing of light");
-        }
-
-        private static void AddUnique(List<string> list, string value)
-        {
-            if (string.IsNullOrEmpty(value) || ContainsIgnoreCase(list, value)) return;
-            list.Add(value);
-        }
-
-        private static bool ContainsIgnoreCase(List<string> list, string value)
-        {
-            if (list == null || string.IsNullOrEmpty(value)) return false;
-            for (int i = 0; i < list.Count; i++)
-            {
-                if (string.Equals(list[i] ?? "", value, StringComparison.OrdinalIgnoreCase))
-                    return true;
-            }
-            return false;
-        }
-
-        private static bool NonEmptyIdMatches(string left, string right)
-        {
-            return !string.IsNullOrEmpty(left) &&
-                   !string.IsNullOrEmpty(right) &&
-                   string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool NonEmptyListMatches(List<string> left, List<string> right)
-        {
-            if (left == null || right == null) return false;
-            for (int i = 0; i < left.Count; i++)
-            {
-                if (ContainsIgnoreCase(right, left[i])) return true;
-            }
-            return false;
+            if (_actorResultCritReflectionInit) return;
+            _actorResultCritReflectionInit = true;
+            _actorResultCritField = typeof(Assets.Code.Skill.SkillCalculation.ActorResult)
+                .GetField("m_Crit", BindingFlags.NonPublic | BindingFlags.Instance);
         }
 
         private static float GetProjectedHpBefore(uint targetGuid, float fallbackDamage, Dictionary<uint, float> projectedHp)
@@ -2371,6 +2494,22 @@ namespace DD2DamageMeter
             catch { return false; }
         }
 
+        private static bool IsCritToken(TokenDefinition token)
+        {
+            try
+            {
+                if (token == null) return false;
+                return token.GetHasType(TokenType.CRIT) || IsCritTokenId(token.Id);
+            }
+            catch { return false; }
+        }
+
+        private static bool IsCritTokenId(string tokenId)
+        {
+            return string.Equals(tokenId ?? "", "crit", StringComparison.OrdinalIgnoreCase) ||
+                   string.Equals(tokenId ?? "", "crit_plus", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static bool IsShieldToken(TokenDefinition token)
         {
             try
@@ -2412,6 +2551,57 @@ namespace DD2DamageMeter
             if (string.Equals(id, "strength", StringComparison.OrdinalIgnoreCase)) return 0.5f;
             if (string.Equals(id, "strength_plus", StringComparison.OrdinalIgnoreCase)) return 0.75f;
             return 0f;
+        }
+
+        private static float GetTokenContributionBonusPct(TokenDefinition token)
+        {
+            float pct = GetDamageBonusPct(token);
+            if (pct > 0.0001f) return pct;
+            return IsCritToken(token) ? GetCritDamageBonusPct() : 0f;
+        }
+
+        private static float GetVulnerableDamageBonusPct(string tokenId)
+        {
+            var token = GetTokenDefinition(tokenId);
+            if (token?.ConsumeBuffs != null)
+            {
+                float pct = 0f;
+                try
+                {
+                    foreach (var buff in token.ConsumeBuffs)
+                        pct += GetDamageTakenBonusPct(buff);
+                }
+                catch { }
+                if (pct > 0.0001f) return pct;
+            }
+            return 0.5f;
+        }
+
+        private static float GetDamageTakenBonusPct(BuffDefinition buff)
+        {
+            if (buff?.ActorDataStats?.StatContainer == null) return 0f;
+            try
+            {
+                var stats = buff.ActorDataStats.StatContainer;
+                if (!stats.GetHasStat(ActorStatType.HEALTH_DAMAGE_RECEIVED_PERCENT)) return 0f;
+                return Mathf.Max(0f, GetStatAddValueIncludingSubstats(stats, ActorStatType.HEALTH_DAMAGE_RECEIVED_PERCENT));
+            }
+            catch { return 0f; }
+        }
+
+        private static float GetCritDamageBonusPct(int critScore = 1)
+        {
+            try
+            {
+                var multipliers = RulesManager.GetRules<CombatRules>()?.m_CritDamageMultiplications;
+                if (multipliers != null && multipliers.Count > 0)
+                {
+                    int index = Mathf.Clamp(critScore, 0, multipliers.Count - 1);
+                    return Mathf.Max(0f, multipliers[index] - 1f);
+                }
+            }
+            catch { }
+            return 0.5f;
         }
 
         private static float GetDamageBonusPct(BuffDefinition buff)
@@ -2499,6 +2689,8 @@ namespace DD2DamageMeter
         private static FieldInfo _dotPerformerGuidsField;
         private static FieldInfo _dotSourceIdsField;
         private static bool _dotResultReflectionInit;
+        private static FieldInfo _actorResultCritField;
+        private static bool _actorResultCritReflectionInit;
 
         private static void InitLibraryTeamReflection()
         {

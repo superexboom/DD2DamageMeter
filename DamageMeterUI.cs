@@ -68,6 +68,8 @@ namespace DD2DamageMeter
         // Scale factor based on screen resolution
         private float _scaleFactor = 1f;
         private int _lastScreenHeight;
+        private int _lastUiSettingsVersion;
+        private int _styleVersion = -1;
 
         public DamageMeterUI(DamageTracker tracker, ContributionTracker contributionTracker = null)
         {
@@ -77,11 +79,16 @@ namespace DD2DamageMeter
 
         private void UpdateScaleFactor()
         {
-            if (Screen.height == _lastScreenHeight) return;
+            int settingsVersion = DamageMeterUiSettings.Version;
+            if (Screen.height == _lastScreenHeight && settingsVersion == _lastUiSettingsVersion) return;
             _lastScreenHeight = Screen.height;
-            // Base design at 1080p; scale up for higher resolutions
-            _scaleFactor = Mathf.Max(1f, Screen.height / 1080f);
+            _lastUiSettingsVersion = settingsVersion;
+            _scaleFactor = DamageMeterUiSettings.OverlayScale;
         }
+
+        private static float U(float value) => DamageMeterUiSettings.Size(value);
+
+        private static int F(int baseFontSize) => DamageMeterUiSettings.Font(baseFontSize);
 
         private Texture2D MakeTex(int width, int height, Color color)
         {
@@ -95,7 +102,8 @@ namespace DD2DamageMeter
 
         private void InitStyles()
         {
-            if (_stylesInitialized) return;
+            int settingsVersion = DamageMeterUiSettings.Version;
+            if (_stylesInitialized && _styleVersion == settingsVersion) return;
 
             // Create semi-transparent textures
             _windowBgTex = MakeTex(2, 2, new Color(0f, 0f, 0f, 0.35f));
@@ -109,13 +117,13 @@ namespace DD2DamageMeter
             _windowStyle.focused.background = _windowBgTex;
             _windowStyle.onFocused.background = _windowBgTex;
             _windowStyle.normal.textColor = new Color(0.9f, 0.85f, 0.7f);
-            _windowStyle.fontSize = 13;
+            _windowStyle.fontSize = F(13);
             _windowStyle.fontStyle = FontStyle.Bold;
-            _windowStyle.padding = new RectOffset(6, 6, 22, 4);
+            _windowStyle.padding = new RectOffset((int)U(6), (int)U(6), (int)U(22), (int)U(4));
 
             _headerStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = 12,
+                fontSize = F(12),
                 fontStyle = FontStyle.Bold,
                 alignment = TextAnchor.MiddleCenter,
                 normal = { textColor = new Color(0.95f, 0.85f, 0.4f) }
@@ -123,7 +131,7 @@ namespace DD2DamageMeter
 
             _totalStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = 12,
+                fontSize = F(12),
                 fontStyle = FontStyle.Bold,
                 alignment = TextAnchor.MiddleCenter,
                 normal = { textColor = new Color(0.95f, 0.85f, 0.4f) }
@@ -131,7 +139,7 @@ namespace DD2DamageMeter
 
             _labelStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = 11,
+                fontSize = F(11),
                 alignment = TextAnchor.MiddleLeft,
                 normal = { textColor = Color.white },
                 clipping = TextClipping.Overflow
@@ -139,26 +147,26 @@ namespace DD2DamageMeter
 
             _valueStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = 11,
+                fontSize = F(11),
                 alignment = TextAnchor.MiddleCenter,
                 normal = { textColor = new Color(0.9f, 0.9f, 0.9f) }
             };
 
             _toggleStyle = new GUIStyle(GUI.skin.button)
             {
-                fontSize = 11,
+                fontSize = F(11),
                 fontStyle = FontStyle.Bold
             };
 
             _resizeStyle = new GUIStyle(GUI.skin.label)
             {
-                fontSize = 11,
+                fontSize = F(11),
                 normal = { textColor = new Color(0.6f, 0.6f, 0.6f, 0.8f) }
             };
 
             _checkStyle = new GUIStyle(GUI.skin.toggle)
             {
-                fontSize = 11,
+                fontSize = F(11),
                 fontStyle = FontStyle.Bold,
                 normal = { textColor = Color.white },
                 onNormal = { textColor = Color.white },
@@ -166,19 +174,20 @@ namespace DD2DamageMeter
                 onHover = { textColor = Color.white }
             };
 
+            _styleVersion = settingsVersion;
             _stylesInitialized = true;
         }
 
         private float[] GetColWidths()
         {
             float fixedW = 0f;
-            foreach (var w in FixedColWidths) fixedW += w;
+            foreach (var w in FixedColWidths) fixedW += U(w);
             // Subtract margins + window chrome padding + scrollbar + safety
-            float nameW = _windowWidth - EDGE_MARGIN * 2 - 30f - fixedW;
-            if (nameW < 100f) nameW = 100f;
+            float nameW = _windowWidth - U(EDGE_MARGIN) * 2 - U(30f) - fixedW;
+            if (nameW < U(100f)) nameW = U(100f);
             float[] widths = new float[ColKeys.Length];
             widths[0] = nameW;
-            for (int i = 0; i < FixedColWidths.Length; i++) widths[i + 1] = FixedColWidths[i];
+            for (int i = 0; i < FixedColWidths.Length; i++) widths[i + 1] = U(FixedColWidths[i]);
             return widths;
         }
 
@@ -186,6 +195,15 @@ namespace DD2DamageMeter
         {
             InitStyles();
             UpdateScaleFactor();
+            _windowWidth = Mathf.Max(U(MIN_WIDTH), _windowWidth);
+            _windowHeight = Mathf.Max(U(MIN_HEIGHT), _windowHeight);
+            _windowRect.width = _windowWidth;
+            _windowRect.height = _windowHeight;
+            if (_showSettings)
+            {
+                _settingsRect.width = Mathf.Max(_settingsRect.width, U(540f));
+                _settingsRect.height = Mathf.Max(_settingsRect.height, U(160f));
+            }
             _remoteMode = DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out _remoteSnapshot);
             if (!_remoteMode)
             {
@@ -219,7 +237,8 @@ namespace DD2DamageMeter
             // Scale mouse position for resize detection
             float mx = e.mousePosition.x / _scaleFactor;
             float my = e.mousePosition.y / _scaleFactor;
-            Rect resizeRect = new Rect(_windowRect.xMax - RESIZE_HANDLE, _windowRect.yMax - RESIZE_HANDLE, RESIZE_HANDLE, RESIZE_HANDLE);
+            float resizeHandle = U(RESIZE_HANDLE);
+            Rect resizeRect = new Rect(_windowRect.xMax - resizeHandle, _windowRect.yMax - resizeHandle, resizeHandle, resizeHandle);
             if (e.type == EventType.MouseDown && e.button == 0 && resizeRect.Contains(new Vector2(mx, my)))
             {
                 _isResizing = true;
@@ -230,8 +249,8 @@ namespace DD2DamageMeter
             }
             else if (_isResizing && e.type == EventType.MouseDrag)
             {
-                _windowWidth = Mathf.Max(MIN_WIDTH, _resizeStartW + (mx - _resizeStart.x));
-                _windowHeight = Mathf.Max(MIN_HEIGHT, _resizeStartH + (my - _resizeStart.y));
+                _windowWidth = Mathf.Max(U(MIN_WIDTH), _resizeStartW + (mx - _resizeStart.x));
+                _windowHeight = Mathf.Max(U(MIN_HEIGHT), _resizeStartH + (my - _resizeStart.y));
                 _windowRect.width = _windowWidth;
                 _windowRect.height = _windowHeight;
                 _windowRect = UiUtil.ClampToScreen(_windowRect, _scaleFactor);
@@ -253,11 +272,11 @@ namespace DD2DamageMeter
                 {
                     Color prevBg = GUI.backgroundColor;
                     GUI.backgroundColor = _showPlayerTeam ? new Color(0.3f, 0.6f, 0.9f) : new Color(0.4f, 0.4f, 0.4f);
-                    if (GUILayout.Button(DmText.T("heroes"), _toggleStyle, GUILayout.Width(_windowWidth / 2f - 12))) _showPlayerTeam = true;
+                    if (GUILayout.Button(DmText.T("heroes"), _toggleStyle, GUILayout.Width(_windowWidth / 2f - U(12)))) _showPlayerTeam = true;
                     GUI.backgroundColor = !_showPlayerTeam ? new Color(0.9f, 0.3f, 0.3f) : new Color(0.4f, 0.4f, 0.4f);
-                    if (GUILayout.Button(DmText.T("enemies"), _toggleStyle, GUILayout.Width(_windowWidth / 2f - 56))) _showPlayerTeam = false;
+                    if (GUILayout.Button(DmText.T("enemies"), _toggleStyle, GUILayout.Width(_windowWidth / 2f - U(56)))) _showPlayerTeam = false;
                     GUI.backgroundColor = new Color(0.4f, 0.8f, 0.4f);
-                    if (GUILayout.Button(DmText.T("log"), _toggleStyle, GUILayout.Width(40))) OnToggleLog?.Invoke();
+                    if (GUILayout.Button(DmText.T("log"), _toggleStyle, GUILayout.Width(U(40)))) OnToggleLog?.Invoke();
                     GUI.backgroundColor = prevBg;
                 }
                 GUILayout.EndHorizontal();
@@ -271,13 +290,13 @@ namespace DD2DamageMeter
                         bool recording = IsRecording?.Invoke() ?? false;
                         GUI.backgroundColor = recording ? new Color(0.9f, 0.3f, 0.3f) : new Color(0.4f, 0.4f, 0.4f);
                         string recLabel = recording ? DmText.Format("recording", BattleCount?.Invoke() ?? 0) : DmText.T("recordRun");
-                        if (GUILayout.Button(recLabel, _toggleStyle, GUILayout.Width(150))) OnToggleRecording?.Invoke();
+                        if (GUILayout.Button(recLabel, _toggleStyle, GUILayout.Width(U(150)))) OnToggleRecording?.Invoke();
                         GUI.backgroundColor = new Color(0.6f, 0.8f, 0.6f);
-                        if (GUILayout.Button(DmText.T("runStats"), _toggleStyle, GUILayout.Width(85))) OnShowRunStats?.Invoke();
+                        if (GUILayout.Button(DmText.T("runStats"), _toggleStyle, GUILayout.Width(U(85)))) OnShowRunStats?.Invoke();
                         GUI.backgroundColor = new Color(0.6f, 0.7f, 0.9f);
-                        if (GUILayout.Button(DmText.T("exportCsv"), _toggleStyle, GUILayout.Width(95))) OnExportCsv?.Invoke();
+                        if (GUILayout.Button(DmText.T("exportCsv"), _toggleStyle, GUILayout.Width(U(95)))) OnExportCsv?.Invoke();
                         GUI.backgroundColor = new Color(0.45f, 0.55f, 0.7f);
-                        if (GUILayout.Button(DmText.T("exportDir"), _toggleStyle, GUILayout.Width(90)))
+                        if (GUILayout.Button(DmText.T("exportDir"), _toggleStyle, GUILayout.Width(U(90))))
                         {
                             _showSettings = !_showSettings;
                             if (_showSettings) LoadExportDirectoryEdit();
@@ -290,16 +309,16 @@ namespace DD2DamageMeter
                         bool recording = IsRecording?.Invoke() ?? false;
                         GUI.backgroundColor = recording ? new Color(0.9f, 0.3f, 0.3f) : new Color(0.4f, 0.4f, 0.4f);
                         string recLabel = recording ? DmText.Format("recording", BattleCount?.Invoke() ?? 0) : DmText.T("recordRun");
-                        if (GUILayout.Button(recLabel, _toggleStyle, GUILayout.Width(150))) OnToggleRecording?.Invoke();
+                        if (GUILayout.Button(recLabel, _toggleStyle, GUILayout.Width(U(150)))) OnToggleRecording?.Invoke();
                         GUI.backgroundColor = new Color(0.6f, 0.8f, 0.6f);
-                        if (GUILayout.Button(DmText.T("runStats"), _toggleStyle, GUILayout.Width(85))) OnShowRunStats?.Invoke();
+                        if (GUILayout.Button(DmText.T("runStats"), _toggleStyle, GUILayout.Width(U(85)))) OnShowRunStats?.Invoke();
                         GUI.backgroundColor = new Color(0.6f, 0.7f, 0.9f);
-                        if (GUILayout.Button(DmText.T("exportCsv"), _toggleStyle, GUILayout.Width(95))) OnExportCsv?.Invoke();
+                        if (GUILayout.Button(DmText.T("exportCsv"), _toggleStyle, GUILayout.Width(U(95)))) OnExportCsv?.Invoke();
                         GUI.backgroundColor = prevBg2;
                         bool autoRecording = IsAutoRecordingEnabled?.Invoke() ?? false;
-                        bool nextAutoRecording = GUILayout.Toggle(autoRecording, DmText.T("autoRec"), _checkStyle, GUILayout.Width(95));
+                        bool nextAutoRecording = GUILayout.Toggle(autoRecording, DmText.T("autoRec"), _checkStyle, GUILayout.Width(U(95)));
                         if (nextAutoRecording != autoRecording) OnAutoRecordingChanged?.Invoke(nextAutoRecording);
-                        if (GUILayout.Button(DmText.T("exportDir"), _toggleStyle, GUILayout.Width(90)))
+                        if (GUILayout.Button(DmText.T("exportDir"), _toggleStyle, GUILayout.Width(U(90))))
                         {
                             _showSettings = !_showSettings;
                             if (_showSettings) LoadExportDirectoryEdit();
@@ -313,7 +332,7 @@ namespace DD2DamageMeter
                 {
                     GUILayout.Label(DmText.Format("remoteUnavailable", _remoteSnapshot.UnavailableReason ?? DmText.T("unknown")), _labelStyle);
                     GUILayout.EndVertical();
-                    GUI.DragWindow(new Rect(0, 0, _windowWidth, _windowHeight - RESIZE_HANDLE));
+                    GUI.DragWindow(new Rect(0, 0, _windowWidth, _windowHeight - U(RESIZE_HANDLE)));
                     return;
                 }
 
@@ -328,13 +347,13 @@ namespace DD2DamageMeter
                 float[] cw = GetColWidths();
 
                 // Draw column headers using manual Rect positioning (same as data rows)
-                Rect headerRect = GUILayoutUtility.GetRect(_windowWidth - RESIZE_HANDLE, HEADER_HEIGHT);
+                Rect headerRect = GUILayoutUtility.GetRect(_windowWidth - U(RESIZE_HANDLE), U(HEADER_HEIGHT));
                 // Draw header background
                 GUI.color = new Color(1f, 1f, 1f, 1f);
                 GUI.DrawTexture(new Rect(headerRect.x, headerRect.y, headerRect.width, headerRect.height), _headerBgTex);
                 GUI.color = Color.white;
 
-                float hx = headerRect.x + EDGE_MARGIN;
+                float hx = headerRect.x + U(EDGE_MARGIN);
                 for (int i = 0; i < ColKeys.Length; i++)
                 {
                     GUI.Label(new Rect(hx, headerRect.y, cw[i], headerRect.height), DmText.T(ColKeys[i]), _headerStyle);
@@ -342,8 +361,8 @@ namespace DD2DamageMeter
                 }
 
                 // Scroll area
-                float scrollH = _windowHeight - 150f;
-                if (scrollH < 60f) scrollH = 60f;
+                float scrollH = _windowHeight - U(150f);
+                if (scrollH < U(60f)) scrollH = U(60f);
                 _scrollPos = GUILayout.BeginScrollView(_scrollPos, GUILayout.Height(scrollH));
                 {
                     if (stats == null || stats.Count == 0)
@@ -361,10 +380,10 @@ namespace DD2DamageMeter
                 GUILayout.EndScrollView();
 
                 // Resize handle
-                GUI.Label(new Rect(_windowWidth - RESIZE_HANDLE - 2, _windowHeight - RESIZE_HANDLE - 2, RESIZE_HANDLE, RESIZE_HANDLE), "\u255a", _resizeStyle);
+                GUI.Label(new Rect(_windowWidth - U(RESIZE_HANDLE) - U(2), _windowHeight - U(RESIZE_HANDLE) - U(2), U(RESIZE_HANDLE), U(RESIZE_HANDLE)), "\u255a", _resizeStyle);
             }
             GUILayout.EndVertical();
-            GUI.DragWindow(new Rect(0, 0, _windowWidth, _windowHeight - RESIZE_HANDLE));
+            GUI.DragWindow(new Rect(0, 0, _windowWidth, _windowHeight - U(RESIZE_HANDLE)));
         }
 
         private void LoadExportDirectoryEdit()
@@ -383,13 +402,13 @@ namespace DD2DamageMeter
                 GUILayout.Label(DmText.T("exportDirectory"), _headerStyle);
                 GUILayout.BeginHorizontal();
                 {
-                    _exportDirectoryEdit = GUILayout.TextField(_exportDirectoryEdit ?? "", GUILayout.Width(400));
-                    if (GUILayout.Button(DmText.T("save"), _toggleStyle, GUILayout.Width(55)))
+                    _exportDirectoryEdit = GUILayout.TextField(_exportDirectoryEdit ?? "", GUILayout.Width(U(400)));
+                    if (GUILayout.Button(DmText.T("save"), _toggleStyle, GUILayout.Width(U(55))))
                     {
                         OnExportDirectoryChanged?.Invoke(_exportDirectoryEdit ?? "");
                         _settingsMessage = DmText.T("saved");
                     }
-                    if (GUILayout.Button(DmText.T("reset"), _toggleStyle, GUILayout.Width(55)))
+                    if (GUILayout.Button(DmText.T("reset"), _toggleStyle, GUILayout.Width(U(55))))
                     {
                         _exportDirectoryEdit = "";
                         OnExportDirectoryChanged?.Invoke("");
@@ -399,9 +418,9 @@ namespace DD2DamageMeter
                 GUILayout.EndHorizontal();
                 GUILayout.BeginHorizontal();
                 {
-                    GUILayout.Label(DmText.T("language"), _headerStyle, GUILayout.Width(110));
+                    GUILayout.Label(DmText.T("language"), _headerStyle, GUILayout.Width(U(110)));
                     string languageLabel = DmText.Format("languageButton", GetLanguage?.Invoke() ?? DmText.LanguageDisplay());
-                    if (GUILayout.Button(languageLabel, _toggleStyle, GUILayout.Width(140)))
+                    if (GUILayout.Button(languageLabel, _toggleStyle, GUILayout.Width(U(140))))
                     {
                         OnLanguageChanged?.Invoke(DmText.ToggleLanguageValue());
                     }
@@ -420,7 +439,7 @@ namespace DD2DamageMeter
         {
             float dmgPct = teamTotalDmg > 0 ? s.TotalDamageDealt / teamTotalDmg * 100f : 0f;
             float barPct = maxDmg > 0 ? s.TotalDamageDealt / maxDmg : 0f;
-            Rect row = GUILayoutUtility.GetRect(_windowWidth - RESIZE_HANDLE, ROW_HEIGHT);
+            Rect row = GUILayoutUtility.GetRect(_windowWidth - U(RESIZE_HANDLE), U(ROW_HEIGHT));
 
             // Alternate row background for readability
             if (rowIndex % 2 == 1)
@@ -433,11 +452,11 @@ namespace DD2DamageMeter
             if (barPct > 0f)
             {
                 GUI.color = bc;
-                GUI.DrawTexture(new Rect(row.x + EDGE_MARGIN, row.y, (row.width - EDGE_MARGIN * 2) * barPct, row.height), Texture2D.whiteTexture);
+                GUI.DrawTexture(new Rect(row.x + U(EDGE_MARGIN), row.y, (row.width - U(EDGE_MARGIN) * 2) * barPct, row.height), Texture2D.whiteTexture);
                 GUI.color = Color.white;
             }
 
-            float x = row.x + EDGE_MARGIN, y = row.y, h = row.height;
+            float x = row.x + U(EDGE_MARGIN), y = row.y, h = row.height;
             string dn = s.ActorName ?? $"#{s.ActorGuid}";
             GUI.Label(new Rect(x, y, cw[0], h), dn, _labelStyle); x += cw[0];
             GUI.Label(new Rect(x, y, cw[1], h), $"{s.TotalDamageDealt:F0}", _valueStyle); x += cw[1];
@@ -475,28 +494,30 @@ namespace DD2DamageMeter
             }
             if (!hasAny) return;
 
-            GUILayout.Space(8);
+            GUILayout.Space(U(8));
             GUILayout.Label(DmText.T("contribution"), _totalStyle);
 
-            const float contribW = 62f;
-            const float bonusW = 54f;
-            const float vulnerableW = 52f;
-            const float shieldW = 56f;
-            const float guardW = 52f;
-            const float comboConsumedW = 58f;
-            const float pctW = 46f;
-            float nameW = _windowWidth - EDGE_MARGIN * 2 - 30f - contribW - bonusW - vulnerableW - shieldW - guardW - comboConsumedW - pctW;
-            if (nameW < 120f) nameW = 120f;
+            float contribW = U(62f);
+            float bonusW = U(54f);
+            float vulnerableW = U(52f);
+            float shieldW = U(56f);
+            float guardW = U(52f);
+            float dotPreventedW = U(62f);
+            float comboConsumedW = U(58f);
+            float pctW = U(46f);
+            float nameW = _windowWidth - U(EDGE_MARGIN) * 2 - U(30f) - contribW - bonusW - vulnerableW - shieldW - guardW - dotPreventedW - comboConsumedW - pctW;
+            if (nameW < U(120f)) nameW = U(120f);
 
-            Rect headerRect = GUILayoutUtility.GetRect(_windowWidth - RESIZE_HANDLE, HEADER_HEIGHT);
+            Rect headerRect = GUILayoutUtility.GetRect(_windowWidth - U(RESIZE_HANDLE), U(HEADER_HEIGHT));
             GUI.DrawTexture(new Rect(headerRect.x, headerRect.y, headerRect.width, headerRect.height), _headerBgTex);
-            float hx = headerRect.x + EDGE_MARGIN;
+            float hx = headerRect.x + U(EDGE_MARGIN);
             GUI.Label(new Rect(hx, headerRect.y, nameW, headerRect.height), DmText.T("name"), _headerStyle); hx += nameW;
             GUI.Label(new Rect(hx, headerRect.y, contribW, headerRect.height), DmText.T("contrib"), _headerStyle); hx += contribW;
             GUI.Label(new Rect(hx, headerRect.y, bonusW, headerRect.height), DmText.T("dmgPlus"), _headerStyle); hx += bonusW;
             GUI.Label(new Rect(hx, headerRect.y, vulnerableW, headerRect.height), DmText.T("vulnerableShort"), _headerStyle); hx += vulnerableW;
             GUI.Label(new Rect(hx, headerRect.y, shieldW, headerRect.height), DmText.T("shield"), _headerStyle); hx += shieldW;
             GUI.Label(new Rect(hx, headerRect.y, guardW, headerRect.height), DmText.T("guard"), _headerStyle); hx += guardW;
+            GUI.Label(new Rect(hx, headerRect.y, dotPreventedW, headerRect.height), DmText.T("dotPrevented"), _headerStyle); hx += dotPreventedW;
             GUI.Label(new Rect(hx, headerRect.y, comboConsumedW, headerRect.height), DmText.T("comboConsumed"), _headerStyle); hx += comboConsumedW;
             GUI.Label(new Rect(hx, headerRect.y, pctW, headerRect.height), DmText.T("pct"), _headerStyle);
 
@@ -505,10 +526,10 @@ namespace DD2DamageMeter
             {
                 var s = rows[i];
                 if (s.TotalContribution <= 0.01f && s.ComboConsumed <= 0) continue;
-                Rect row = GUILayoutUtility.GetRect(_windowWidth - RESIZE_HANDLE, ROW_HEIGHT);
+                Rect row = GUILayoutUtility.GetRect(_windowWidth - U(RESIZE_HANDLE), U(ROW_HEIGHT));
                 if (drawn % 2 == 1) GUI.DrawTexture(new Rect(row.x, row.y, row.width, row.height), _rowAltTex);
 
-                float x = row.x + EDGE_MARGIN, y = row.y, h = row.height;
+                float x = row.x + U(EDGE_MARGIN), y = row.y, h = row.height;
                 string nm = s.ActorName ?? $"#{s.ActorGuid}";
                 GUI.Label(new Rect(x, y, nameW, h), nm, _labelStyle); x += nameW;
                 GUI.Label(new Rect(x, y, contribW, h), s.TotalContribution > 0 ? $"{s.TotalContribution:F1}" : "-", _valueStyle); x += contribW;
@@ -516,6 +537,7 @@ namespace DD2DamageMeter
                 GUI.Label(new Rect(x, y, vulnerableW, h), s.VulnerableDamage > 0 ? $"{s.VulnerableDamage:F1}" : "-", _valueStyle); x += vulnerableW;
                 GUI.Label(new Rect(x, y, shieldW, h), s.ShieldPrevented > 0 ? $"{s.ShieldPrevented:F1}" : "-", _valueStyle); x += shieldW;
                 GUI.Label(new Rect(x, y, guardW, h), s.GuardProtected > 0 ? $"{s.GuardProtected:F1}" : "-", _valueStyle); x += guardW;
+                GUI.Label(new Rect(x, y, dotPreventedW, h), s.DotDamagePrevented > 0 ? $"{s.DotDamagePrevented:F1}" : "-", _valueStyle); x += dotPreventedW;
                 GUI.Label(new Rect(x, y, comboConsumedW, h), s.ComboConsumed > 0 ? $"{s.ComboConsumed}" : "-", _valueStyle); x += comboConsumedW;
                 float pct = total > 0f ? s.TotalContribution / total * 100f : 0f;
                 GUI.Label(new Rect(x, y, pctW, h), $"{pct:F1}%", _valueStyle);
@@ -616,6 +638,7 @@ namespace DD2DamageMeter
                     VulnerableDamage = s.VulnerableDamage,
                     ShieldPrevented = s.ShieldPrevented,
                     GuardProtected = s.GuardProtected,
+                    DotDamagePrevented = s.DotDamagePrevented,
                     ShieldWasted = s.ShieldWasted,
                     ComboApplied = s.ComboApplied,
                     ComboConsumed = s.ComboConsumed,
@@ -644,6 +667,7 @@ namespace DD2DamageMeter
                     VulnerableDamage = s.VulnerableDamage,
                     ShieldPrevented = s.ShieldPrevented,
                     GuardProtected = s.GuardProtected,
+                    DotDamagePrevented = s.DotDamagePrevented,
                     ShieldWasted = s.ShieldWasted,
                     ComboApplied = s.ComboApplied,
                     ComboConsumed = s.ComboConsumed,
@@ -679,6 +703,7 @@ namespace DD2DamageMeter
             public float VulnerableDamage;
             public float ShieldPrevented;
             public float GuardProtected;
+            public float DotDamagePrevented;
             public int ShieldWasted;
             public int ComboApplied;
             public int ComboConsumed;

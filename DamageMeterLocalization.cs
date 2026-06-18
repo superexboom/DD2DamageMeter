@@ -180,7 +180,7 @@ namespace DD2DamageMeter
                 case "battlesRecorded": return "Battles Recorded: {0}";
                 case "exported": return "Exported: {0:yyyy-MM-dd HH:mm:ss}";
                 case "csvHeroesHeader": return "Name,Battles,TotalDMG,DOT_DMG,OVK_DMG,RawDMG_Taken,ActualDMG_Taken,HealingDone,HealingReceived,Stress,Kills,Crits,AvoidRate,AvoidChecks,AvoidedAttacks,DodgeAvoids,MissAvoids,ComboApplied";
-                case "csvContributionHeader": return "Name,TotalContribution,BonusDamage,VulnerableDamage,ShieldPrevented,GuardProtected,ComboConsumed,ContributionPct";
+                case "csvContributionHeader": return "Name,TotalContribution,BonusDamage,VulnerableDamage,ShieldPrevented,GuardProtected,DotDamagePrevented,ComboConsumed,ContributionPct";
                 case "csvPerBattle": return "--- Per Battle Breakdown ---";
                 case "csvBattle": return "Battle #{0} ({1:HH:mm:ss})";
                 case "csvTeamHeader": return "Team,Name,DMG,DOT_DMG,OVK_DMG,RawDMG_Taken,ActualDMG_Taken,HealingDone,HealingReceived,Kills,Crits,AvoidRate,AvoidChecks,AvoidedAttacks,DodgeAvoids,MissAvoids,ComboApplied";
@@ -204,6 +204,7 @@ namespace DD2DamageMeter
                 case "vulnerableShort": return "Vuln";
                 case "shield": return "Shield";
                 case "guard": return "Guard";
+                case "dotPrevented": return "DOT Block";
                 case "waste": return "Waste";
                 case "wasteShort": return "W";
                 case "comboApplied": return "Combo+";
@@ -274,7 +275,7 @@ namespace DD2DamageMeter
                 case "battlesRecorded": return "录制战斗数：{0}";
                 case "exported": return "导出时间：{0:yyyy-MM-dd HH:mm:ss}";
                 case "csvHeroesHeader": return "名称,战斗数,总伤害,DOT伤害,溢出伤害,理论承伤,实际承伤,造成治疗,受到治疗,压力,击杀,暴击,闪避率,受击判定,闪避次数,闪避Token,致盲Miss,有效Combo";
-                case "csvContributionHeader": return "名称,总贡献,增伤贡献,易伤贡献,减伤贡献,守护贡献,Combo消耗贡献,贡献占比";
+                case "csvContributionHeader": return "名称,总贡献,增伤贡献,易伤贡献,减伤贡献,守护贡献,阻止DOT伤害,Combo消耗贡献,贡献占比";
                 case "csvPerBattle": return "--- 单场明细 ---";
                 case "csvBattle": return "第 {0} 场（{1:HH:mm:ss}）";
                 case "csvTeamHeader": return "队伍,名称,伤害,DOT伤害,溢出伤害,理论承伤,实际承伤,造成治疗,受到治疗,击杀,暴击,闪避率,受击判定,闪避次数,闪避Token,致盲Miss,有效Combo";
@@ -298,6 +299,7 @@ namespace DD2DamageMeter
                 case "vulnerableShort": return "易伤";
                 case "shield": return "护盾";
                 case "guard": return "守护";
+                case "dotPrevented": return "阻止DOT";
                 case "waste": return "浪费";
                 case "wasteShort": return "废";
                 case "comboApplied": return "Combo+";

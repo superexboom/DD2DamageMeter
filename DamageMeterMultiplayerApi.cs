@@ -32,7 +32,7 @@ namespace DD2DamageMeter
             {
                 ApiVersion = ApiVersion,
                 ProviderVersion = Plugin.Version,
-                Capabilities = "main,contribution,status,combat_log,combo,vulnerable",
+                Capabilities = "main,contribution,status,combat_log,combo,vulnerable,dot_prevented",
                 IsAvailable = true,
                 IsActive = plugin.IsBattleActive,
             };
@@ -180,6 +180,7 @@ namespace DD2DamageMeter
                 VulnerableDamage = stats.VulnerableDamage,
                 ShieldPrevented = stats.ShieldPrevented,
                 GuardProtected = stats.GuardProtected,
+                DotDamagePrevented = stats.DotDamagePrevented,
                 ShieldWasted = stats.ShieldWasted,
                 ComboApplied = stats.ComboApplied,
                 ComboConsumed = stats.ComboConsumed,
@@ -327,6 +328,7 @@ namespace DD2DamageMeter
                     .Append(FormatFloat(row.VulnerableDamage)).Append(',')
                     .Append(FormatFloat(row.ShieldPrevented)).Append(',')
                     .Append(FormatFloat(row.GuardProtected)).Append(',')
+                    .Append(FormatFloat(row.DotDamagePrevented)).Append(',')
                     .Append(row.ShieldWasted).Append(',')
                     .Append(row.ComboApplied).Append(',')
                     .Append(row.ComboConsumed).Append('|');
@@ -494,19 +496,27 @@ namespace DD2DamageMeter
                 if (item == null)
                     continue;
 
+                float bonusDamage = GetFloat(item, "BonusDamage", 0f);
+                float vulnerableDamage = GetFloat(item, "VulnerableDamage", 0f);
+                float shieldPrevented = GetFloat(item, "ShieldPrevented", 0f);
+                float guardProtected = GetFloat(item, "GuardProtected", 0f);
+                float dotDamagePrevented = GetFloat(item, "DotDamagePrevented", 0f);
+                float totalContribution = bonusDamage + vulnerableDamage + shieldPrevented + guardProtected + dotDamagePrevented;
+
                 rows.Add(new DamageMeterMpContributionStats
                 {
                     ActorGuid = GetString(item, "ActorGuid", null),
                     ActorName = GetString(item, "ActorName", null),
                     TeamIndex = GetInt(item, "TeamIndex", -1),
-                    BonusDamage = GetFloat(item, "BonusDamage", 0f),
-                    VulnerableDamage = GetFloat(item, "VulnerableDamage", 0f),
-                    ShieldPrevented = GetFloat(item, "ShieldPrevented", 0f),
-                    GuardProtected = GetFloat(item, "GuardProtected", 0f),
+                    BonusDamage = bonusDamage,
+                    VulnerableDamage = vulnerableDamage,
+                    ShieldPrevented = shieldPrevented,
+                    GuardProtected = guardProtected,
+                    DotDamagePrevented = dotDamagePrevented,
                     ShieldWasted = GetInt(item, "ShieldWasted", 0),
                     ComboApplied = GetInt(item, "ComboApplied", 0),
                     ComboConsumed = GetInt(item, "ComboConsumed", 0),
-                    TotalContribution = GetFloat(item, "TotalContribution", 0f),
+                    TotalContribution = GetFloat(item, "TotalContribution", totalContribution),
                 });
             }
 
@@ -605,6 +615,7 @@ namespace DD2DamageMeter
                 VulnerableDamage = source.VulnerableDamage,
                 ShieldPrevented = source.ShieldPrevented,
                 GuardProtected = source.GuardProtected,
+                DotDamagePrevented = source.DotDamagePrevented,
                 ShieldWasted = source.ShieldWasted,
                 ComboApplied = source.ComboApplied,
                 ComboConsumed = source.ComboConsumed,
@@ -800,6 +811,7 @@ namespace DD2DamageMeter
         public float VulnerableDamage { get; set; }
         public float ShieldPrevented { get; set; }
         public float GuardProtected { get; set; }
+        public float DotDamagePrevented { get; set; }
         public int ShieldWasted { get; set; }
         public int ComboApplied { get; set; }
         public int ComboConsumed { get; set; }

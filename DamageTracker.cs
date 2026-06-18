@@ -41,7 +41,7 @@ namespace DD2DamageMeter
         }
 
         private readonly DotSourceTracker _dotSources = new DotSourceTracker();
-        private readonly FloorDotSourceTracker _floorDotSources = new FloorDotSourceTracker();
+        private readonly FloorEffectSourceTracker _floorSources;
         private readonly Dictionary<uint, List<uint>> _maledictionSources = new Dictionary<uint, List<uint>>();
         private readonly Dictionary<uint, ProjectedHealth> _dotProjectedHp = new Dictionary<uint, ProjectedHealth>();
         // Boss phase detection: guid -> last known name
@@ -58,6 +58,15 @@ namespace DD2DamageMeter
         public IReadOnlyList<ActorStats> EnemyStats => _enemySnapshot;
         public float PlayerTotalDamage { get; private set; }
         public float EnemyTotalDamage { get; private set; }
+
+        public DamageTracker() : this(null)
+        {
+        }
+
+        internal DamageTracker(FloorEffectSourceTracker floorSources)
+        {
+            _floorSources = floorSources ?? new FloorEffectSourceTracker();
+        }
 
         private struct ProjectedHealth
         {
@@ -146,7 +155,6 @@ namespace DD2DamageMeter
                 lock (_lock)
                 {
                     if (evt.m_Actor == null || evt.m_DotDefinition == null) return;
-                    _floorDotSources.OnDotAdded(evt, guid => ResolveTeamIndex(guid) == 0);
                     _dotSources.OnDotAdded(evt, ResolveIndirectDotSource);
                 }
             }
@@ -179,6 +187,12 @@ namespace DD2DamageMeter
                         return;
                     }
 
+                    if (IsCorpseActor(targetGuid, null))
+                    {
+                        _dotSources.ApplyExpired(targetGuid, dotType);
+                        return;
+                    }
+
                     float healthChange = evt.m_effectApplyCombinedResult.HealthChange;
 
                     if (healthChange < -0.01f) // DOT damage
@@ -205,7 +219,12 @@ namespace DD2DamageMeter
                     }
                     else if (healthChange > 0.01f) // HoT heal
                     {
-                        float healAmt = healthChange;
+                        float healAmt = GetEffectiveDotHeal(targetGuid, healthChange);
+                        if (healAmt <= 0.01f)
+                        {
+                            _dotSources.ApplyExpired(targetGuid, dotType);
+                            return;
+                        }
                         var targetStats = GetOrCreate(targetGuid, -1);
                         targetStats.TotalHealingReceived += healAmt;
 
@@ -258,7 +277,7 @@ namespace DD2DamageMeter
 
         private uint ResolveIndirectDotSource(ActorInstance targetActor, string dotId, string dotType, uint currentSourceActorGuid, SourceType sourceType, string sourceId)
         {
-            uint floorSource = _floorDotSources.ResolveDotSource(targetActor, dotId, dotType, currentSourceActorGuid, sourceType, sourceId, guid => ResolveTeamIndex(guid) == 0);
+            uint floorSource = _floorSources.ResolveDotSource(targetActor, dotId, dotType, currentSourceActorGuid, sourceType, sourceId);
             if (floorSource != 0) return floorSource;
 
             uint targetGuid = targetActor != null ? targetActor.ActorGuid : 0;
@@ -373,6 +392,26 @@ namespace DD2DamageMeter
             return effective;
         }
 
+        private float GetEffectiveDotHeal(uint targetGuid, float rawHeal)
+        {
+            if (rawHeal <= 0f) return 0f;
+            int frame = Time.frameCount;
+            float hp;
+            if (_dotProjectedHp.TryGetValue(targetGuid, out var projected) && projected.Frame == frame)
+            {
+                hp = projected.Hp;
+            }
+            else
+            {
+                hp = TryResolveHpRawPublic(targetGuid, out var resolvedHp) ? Mathf.Max(0f, resolvedHp) : 0f;
+            }
+
+            if (!TryResolveHpMaxPublic(targetGuid, out var hpMax)) return rawHeal;
+            float effective = Mathf.Min(rawHeal, Mathf.Max(0f, hpMax - hp));
+            _dotProjectedHp[targetGuid] = new ProjectedHealth { Frame = frame, Hp = Mathf.Min(hpMax, hp + effective) };
+            return effective;
+        }
+
         private static float GetEffectiveDamageBeforeApply(uint targetGuid, float rawDamage, Dictionary<uint, float> projectedHp)
         {
             if (rawDamage <= 0f) return 0f;
@@ -394,6 +433,21 @@ namespace DD2DamageMeter
             return Mathf.Min(rawDamage, Mathf.Max(0f, hpAfter + rawDamage));
         }
 
+        private static float GetEffectiveHealBeforeApply(uint targetGuid, float rawHeal, Dictionary<uint, float> projectedHp)
+        {
+            if (rawHeal <= 0f) return 0f;
+            float hp;
+            if (!projectedHp.TryGetValue(targetGuid, out hp))
+            {
+                hp = TryResolveHpRawPublic(targetGuid, out var resolvedHp) ? Mathf.Max(0f, resolvedHp) : 0f;
+            }
+
+            if (!TryResolveHpMaxPublic(targetGuid, out var hpMax)) return rawHeal;
+            float effective = Mathf.Min(rawHeal, Mathf.Max(0f, hpMax - hp));
+            projectedHp[targetGuid] = Mathf.Min(hpMax, hp + effective);
+            return effective;
+        }
+
         public void OnHealthDamage(EventActorHealthDamage evt)
         {
             try
@@ -402,6 +456,7 @@ namespace DD2DamageMeter
                 {
                     string srcName = evt.m_SourceType?.ToString() ?? "";
                     if (srcName.ToLowerInvariant().Contains("dot")) return;
+                    if (IsCorpseActor(evt.m_ActorGuid, null)) return;
                     var s = GetOrCreate(evt.m_ActorGuid, evt.m_TeamIndex);
                     s.TotalDamageReceived += GetEffectiveDamageAfterEvent(evt.m_ActorGuid, evt.m_HealthDamage);
                     UpdateAndMarkDirty();
@@ -416,15 +471,33 @@ namespace DD2DamageMeter
             {
                 lock (_lock)
                 {
-                    if (evt.m_SourceType != SourceType.TOKEN || evt.m_HealthChange <= 0.01f) return;
+                    if (!ShouldTrackStandaloneHeal(evt)) return;
 
                     var s = GetOrCreate(evt.m_ActorGuid, evt.m_TeamIndex);
-                    s.TotalHealingReceived += evt.m_HealthChange;
-                    s.TotalHealingDone += evt.m_HealthChange;
+                    float effectiveHeal = Mathf.Max(0f, evt.m_HealthChange);
+                    s.TotalHealingReceived += effectiveHeal;
+                    s.TotalHealingDone += effectiveHeal;
                     UpdateAndMarkDirty();
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"OnHealthHeal error: {ex.Message}"); }
+        }
+
+        private static bool ShouldTrackStandaloneHeal(EventActorHealthHeal evt)
+        {
+            if (evt == null || evt.m_HealthChange <= 0.01f) return false;
+
+            SourceType source = evt.m_SourceType;
+            if (source == SourceType.SKILL ||
+                source == SourceType.SKILL_ACTOR ||
+                source == SourceType.REST_ITEM ||
+                source == SourceType.INVENTORY ||
+                source == SourceType.DOT)
+            {
+                return false;
+            }
+
+            return true;
         }
 
         public void OnStressDamage(EventStressDamage evt)
@@ -439,7 +512,6 @@ namespace DD2DamageMeter
             {
                 lock (_lock)
                 {
-                    _floorDotSources.OnSkillFinalizeResults(evt, guid => ResolveTeamIndex(guid) == 0);
                     uint pid = evt.PerformerGuid;
                     int pt = evt.m_PerformerTeamIndex;
                     GetOrCreate(pid, pt);
@@ -449,13 +521,17 @@ namespace DD2DamageMeter
                         if (ar == null) continue;
                         uint arPid = ar.m_PerformerActorGuid;
                         uint arTid = ar.m_TargetActorGuid;
+                        bool targetIsCorpse = IsCorpseActor(arTid, null);
                         var ps = GetOrCreate(arPid, -1);
                         if (arPid == pid && pt >= 0 && ps.TeamIndex < 0) ps.TeamIndex = pt;
-                        TrackAvoidance(ar, arTid);
-                        if (ar.IsCrit) ps.Crits++;
+                        if (!targetIsCorpse)
+                        {
+                            TrackAvoidance(ar, arTid);
+                            if (ar.IsCrit) ps.Crits++;
+                        }
                         // Exclude self-damage from damage dealt (performer == target)
                         bool isSelfDamage = (arPid == arTid);
-                        if (ar.IsDamaging)
+                        if (ar.IsDamaging && !targetIsCorpse)
                         {
                             float effectiveDamage = GetEffectiveDamageBeforeApply(arTid, ar.HealthDamage, projectedHp);
                             if (!isSelfDamage)
@@ -467,13 +543,21 @@ namespace DD2DamageMeter
                         // Track raw (pre-shield) damage received on target
                         // BaseHealthDamage excludes negative multipliers (block/shield tokens)
                         // HealthDamage is the actual damage after shield reduction
-                        if (ar.IsDamaging || ar.IsBlocked)
+                        if ((ar.IsDamaging || ar.IsBlocked) && !targetIsCorpse)
                         {
                             var ts = GetOrCreate(arTid, ar.m_TargetTeamIndex);
                             float rawDmg = Mathf.Max(ar.BaseHealthDamage, ar.HealthDamage);
                             if (rawDmg > 0f) ts.RawDamageReceived += rawDmg;
                         }
-                        if (ar.IsHealthHeal) { ps.TotalHealingDone += ar.HealthHeal; GetOrCreate(arTid, ar.m_TargetTeamIndex).TotalHealingReceived += ar.HealthHeal; }
+                        if (ar.IsHealthHeal && !targetIsCorpse)
+                        {
+                            float effectiveHeal = GetEffectiveHealBeforeApply(arTid, ar.HealthHeal, projectedHp);
+                            if (effectiveHeal > 0.01f)
+                            {
+                                ps.TotalHealingDone += effectiveHeal;
+                                GetOrCreate(arTid, ar.m_TargetTeamIndex).TotalHealingReceived += effectiveHeal;
+                            }
+                        }
                     }
                     UpdateAndMarkDirty();
                 }
@@ -586,6 +670,8 @@ namespace DD2DamageMeter
             catch (Exception ex) { Plugin.Log.LogWarning($"OnActorDeath error: {ex.Message}"); }
         }
 
+        public static bool IsCorpseActorPublic(uint guid, string actorDataId = null) => IsCorpseActor(guid, actorDataId);
+
         private static bool ShouldCountKill(EventActorDeath evt)
         {
             if (evt == null) return false;
@@ -611,6 +697,13 @@ namespace DD2DamageMeter
                 }
             }
             catch { }
+
+            if (string.IsNullOrEmpty(actorDataId) &&
+                _nameCache.TryGetValue(guid, out var cachedName) &&
+                IsCorpseName(cachedName))
+            {
+                return true;
+            }
 
             return !string.IsNullOrEmpty(actorDataId) &&
                    IsCorpseName(actorDataId);
@@ -670,6 +763,19 @@ namespace DD2DamageMeter
                 if (actor == null) return false;
                 hp = actor.HpRaw;
                 return true;
+            }
+            catch { return false; }
+        }
+
+        public static bool TryResolveHpMaxPublic(uint guid, out float hpMax)
+        {
+            hpMax = 0f;
+            try
+            {
+                var actor = TryResolveActor(guid);
+                if (actor == null) return false;
+                hpMax = actor.CurrentHpMax;
+                return hpMax > 0f;
             }
             catch { return false; }
         }
@@ -823,7 +929,7 @@ namespace DD2DamageMeter
             {
                 _stats = new Dictionary<uint, ActorStats>();
                 _dotSources.Reset();
-                _floorDotSources.Reset();
+                _floorSources.Reset();
                 _maledictionSources.Clear();
                 _dotProjectedHp.Clear();
                 _lastKnownName.Clear();

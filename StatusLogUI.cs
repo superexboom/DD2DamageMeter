@@ -17,6 +17,8 @@ namespace DD2DamageMeter
         private Texture2D _windowBgTex;
         private float _scaleFactor = 1f;
         private int _lastScreenHeight;
+        private int _lastUiSettingsVersion;
+        private int _styleVersion = -1;
 
         public bool IsVisible { get; set; }
 
@@ -34,14 +36,21 @@ namespace DD2DamageMeter
 
         private void UpdateScaleFactor()
         {
-            if (Screen.height == _lastScreenHeight) return;
+            int settingsVersion = DamageMeterUiSettings.Version;
+            if (Screen.height == _lastScreenHeight && settingsVersion == _lastUiSettingsVersion) return;
             _lastScreenHeight = Screen.height;
-            _scaleFactor = Mathf.Max(1f, Screen.height / 1080f);
+            _lastUiSettingsVersion = settingsVersion;
+            _scaleFactor = DamageMeterUiSettings.OverlayScale;
         }
+
+        private static float U(float value) => DamageMeterUiSettings.Size(value);
+
+        private static int F(int baseFontSize) => DamageMeterUiSettings.Font(baseFontSize);
 
         private void Init()
         {
-            if (_init) return;
+            int settingsVersion = DamageMeterUiSettings.Version;
+            if (_init && _styleVersion == settingsVersion) return;
 
             _windowBgTex = MakeTex(2, 2, new Color(0f, 0f, 0f, 0.35f));
 
@@ -51,19 +60,20 @@ namespace DD2DamageMeter
             _windowStyle.focused.background = _windowBgTex;
             _windowStyle.onFocused.background = _windowBgTex;
             _windowStyle.normal.textColor = new Color(0.9f, 0.85f, 0.7f);
-            _windowStyle.fontSize = 13;
+            _windowStyle.fontSize = F(13);
             _windowStyle.fontStyle = FontStyle.Bold;
-            _windowStyle.padding = new RectOffset(6, 6, 22, 4);
+            _windowStyle.padding = new RectOffset((int)U(6), (int)U(6), (int)U(22), (int)U(4));
 
-            _round = new GUIStyle(GUI.skin.label) { fontSize = 12, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.95f, 0.85f, 0.4f) } };
-            _buff = new GUIStyle(GUI.skin.label) { fontSize = 11, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.35f, 0.9f, 0.95f) } };
-            _debuff = new GUIStyle(GUI.skin.label) { fontSize = 11, fontStyle = FontStyle.Bold, normal = { textColor = new Color(1f, 0.45f, 0.85f) } };
-            _status = new GUIStyle(GUI.skin.label) { fontSize = 11, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.9f, 0.85f, 0.55f) } };
-            _summary = new GUIStyle(GUI.skin.label) { fontSize = 11, normal = { textColor = new Color(0.75f, 0.78f, 0.82f) } };
-            _pn = new GUIStyle(GUI.skin.label) { fontSize = 11, fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.4f, 0.7f, 1f) } };
-            _en = new GUIStyle(GUI.skin.label) { fontSize = 11, fontStyle = FontStyle.Bold, normal = { textColor = new Color(1f, 0.4f, 0.4f) } };
-            _nm = new GUIStyle(GUI.skin.label) { fontSize = 11, normal = { textColor = new Color(0.8f, 0.8f, 0.8f) } };
-            _resizeStyle = new GUIStyle(GUI.skin.label) { fontSize = 11, normal = { textColor = new Color(0.6f, 0.6f, 0.6f, 0.8f) } };
+            _round = new GUIStyle(GUI.skin.label) { fontSize = F(12), fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.95f, 0.85f, 0.4f) } };
+            _buff = new GUIStyle(GUI.skin.label) { fontSize = F(11), fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.35f, 0.9f, 0.95f) } };
+            _debuff = new GUIStyle(GUI.skin.label) { fontSize = F(11), fontStyle = FontStyle.Bold, normal = { textColor = new Color(1f, 0.45f, 0.85f) } };
+            _status = new GUIStyle(GUI.skin.label) { fontSize = F(11), fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.9f, 0.85f, 0.55f) } };
+            _summary = new GUIStyle(GUI.skin.label) { fontSize = F(11), normal = { textColor = new Color(0.75f, 0.78f, 0.82f) } };
+            _pn = new GUIStyle(GUI.skin.label) { fontSize = F(11), fontStyle = FontStyle.Bold, normal = { textColor = new Color(0.4f, 0.7f, 1f) } };
+            _en = new GUIStyle(GUI.skin.label) { fontSize = F(11), fontStyle = FontStyle.Bold, normal = { textColor = new Color(1f, 0.4f, 0.4f) } };
+            _nm = new GUIStyle(GUI.skin.label) { fontSize = F(11), normal = { textColor = new Color(0.8f, 0.8f, 0.8f) } };
+            _resizeStyle = new GUIStyle(GUI.skin.label) { fontSize = F(11), normal = { textColor = new Color(0.6f, 0.6f, 0.6f, 0.8f) } };
+            _styleVersion = settingsVersion;
             _init = true;
         }
 
@@ -71,6 +81,10 @@ namespace DD2DamageMeter
         {
             Init();
             UpdateScaleFactor();
+            _w = Mathf.Max(U(MIN_W), _w);
+            _h = Mathf.Max(U(MIN_H), _h);
+            _rect.width = _w;
+            _rect.height = _h;
 
             var prevMatrix = GUI.matrix;
             GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(_scaleFactor, _scaleFactor, 1f));
@@ -83,16 +97,17 @@ namespace DD2DamageMeter
             var e = Event.current;
             float mx = e.mousePosition.x / _scaleFactor;
             float my = e.mousePosition.y / _scaleFactor;
-            var rr = new Rect(_rect.xMax - RH, _rect.yMax - RH, RH, RH);
+            float resizeHandle = U(RH);
+            var rr = new Rect(_rect.xMax - resizeHandle, _rect.yMax - resizeHandle, resizeHandle, resizeHandle);
             if (e.type == EventType.MouseDown && e.button == 0 && rr.Contains(new Vector2(mx, my))) { _rs = true; _rsS = new Vector2(mx, my); _rsW = _w; _rsH = _h; e.Use(); }
-            else if (_rs && e.type == EventType.MouseDrag) { _w = Mathf.Max(MIN_W, _rsW + (mx - _rsS.x)); _h = Mathf.Max(MIN_H, _rsH + (my - _rsS.y)); _rect.width = _w; _rect.height = _h; _rect = UiUtil.ClampToScreen(_rect, _scaleFactor); e.Use(); }
+            else if (_rs && e.type == EventType.MouseDrag) { _w = Mathf.Max(U(MIN_W), _rsW + (mx - _rsS.x)); _h = Mathf.Max(U(MIN_H), _rsH + (my - _rsS.y)); _rect.width = _w; _rect.height = _h; _rect = UiUtil.ClampToScreen(_rect, _scaleFactor); e.Use(); }
             else if (_rs && e.type == EventType.MouseUp) _rs = false;
         }
 
         private void Win(int id)
         {
             DrawStatusSummary();
-            _scroll = GUILayout.BeginScrollView(_scroll, GUILayout.Height(_h - 48f));
+            _scroll = GUILayout.BeginScrollView(_scroll, GUILayout.Height(_h - U(48f)));
             {
                 var entries = _tracker.StatusEntries;
                 bool hasStatusEntry = false;
@@ -113,8 +128,8 @@ namespace DD2DamageMeter
                 }
             }
             GUILayout.EndScrollView();
-            GUI.Label(new Rect(_w - RH - 2, _h - RH - 2, RH, RH), "\u255a", _resizeStyle);
-            GUI.DragWindow(new Rect(0, 0, _w, _h - RH));
+            GUI.Label(new Rect(_w - U(RH) - U(2), _h - U(RH) - U(2), U(RH), U(RH)), "\u255a", _resizeStyle);
+            GUI.DragWindow(new Rect(0, 0, _w, _h - U(RH)));
         }
 
         private void DrawStatusSummary()
@@ -140,10 +155,10 @@ namespace DD2DamageMeter
             {
                 if (!string.IsNullOrEmpty(le.SourceName))
                 {
-                    if (le.SourceName.StartsWith("[")) GUILayout.Label(le.SourceName, _status, GUILayout.Width(70));
-                    else GUILayout.Label(le.SourceName, le.SourceIsPlayer ? _pn : _en, GUILayout.Width(110));
+                    if (le.SourceName.StartsWith("[")) GUILayout.Label(le.SourceName, _status, GUILayout.Width(U(70)));
+                    else GUILayout.Label(le.SourceName, le.SourceIsPlayer ? _pn : _en, GUILayout.Width(U(110)));
                 }
-                else GUILayout.Space(110);
+                else GUILayout.Space(U(110));
 
                 GUIStyle s; string t;
                 switch (le.ActionType)
@@ -164,9 +179,9 @@ namespace DD2DamageMeter
                     default: s = _nm; break;
                 }
                 t = DmText.ActionLabel(le.ActionType, le.Value, le.DotType);
-                GUILayout.Label(t, s, GUILayout.Width(92));
-                GUILayout.Label("->", _nm, GUILayout.Width(20));
-                GUILayout.Label(le.TargetName ?? "?", le.TargetIsPlayer ? _pn : _en, GUILayout.Width(110));
+                GUILayout.Label(t, s, GUILayout.Width(U(92)));
+                GUILayout.Label("->", _nm, GUILayout.Width(U(20)));
+                GUILayout.Label(le.TargetName ?? "?", le.TargetIsPlayer ? _pn : _en, GUILayout.Width(U(110)));
 
                 string info = le.Extra ?? "";
                 if (!string.IsNullOrEmpty(le.SkillId))

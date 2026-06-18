@@ -13,7 +13,7 @@ namespace DD2DamageMeter
     {
         private const string PluginGuid = "com.dd2.damagemeter";
         private const string PluginName = "DD2 Damage Meter";
-        private const string PluginVersion = "1.4.2";
+        private const string PluginVersion = "1.4.19";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance { get; private set; }
@@ -22,6 +22,7 @@ namespace DD2DamageMeter
 
         private Harmony _harmony;
         private DamageTracker _tracker;
+        private FloorEffectSourceTracker _floorEffectSources;
         private DamageMeterUI _ui;
         private CombatLogTracker _logTracker;
         private CombatLogUI _logUi;
@@ -32,6 +33,8 @@ namespace DD2DamageMeter
         private ConfigEntry<bool> _autoStartRecording;
         private ConfigEntry<string> _exportDirectory;
         private ConfigEntry<string> _language;
+        private ConfigEntry<int> _uiFontSize;
+        private ConfigEntry<float> _uiScale;
         private bool _eventManagerReady;
         private float _checkTimer;
         private bool _battleActive;
@@ -57,6 +60,23 @@ namespace DD2DamageMeter
             );
             DmText.SetLanguage(_language.Value);
             Log.LogInfo(DmText.Format("pluginLoading", PluginVersion));
+            _uiFontSize = Config.Bind(
+                "UI",
+                "FontSize",
+                11,
+                new ConfigDescription(
+                    "Base UI font size. Table row heights and fixed column widths expand when this is larger than 11.",
+                    new AcceptableValueRange<int>(8, 28))
+            );
+            _uiScale = Config.Bind(
+                "UI",
+                "Scale",
+                1f,
+                new ConfigDescription(
+                    "Additional UI scale multiplier layered on top of the automatic 1080p resolution scale.",
+                    new AcceptableValueRange<float>(0.5f, 3f))
+            );
+            DamageMeterUiSettings.Configure(() => _uiFontSize.Value, () => _uiScale.Value);
             _autoStartRecording = Config.Bind(
                 "Run",
                 "AutoStartRecording",
@@ -71,12 +91,14 @@ namespace DD2DamageMeter
             );
             _autoStartPending = _autoStartRecording.Value;
             Log.LogInfo(DmText.Format("settingsLoaded", _autoStartRecording.Value, _exportDirectory.Value, _language.Value));
+            Log.LogInfo($"UI settings loaded: fontSize={DamageMeterUiSettings.FontSize}, scale={DamageMeterUiSettings.CustomScale:0.##}.");
 
-            _contributionTracker = new ContributionTracker();
-            _tracker = new DamageTracker();
+            _floorEffectSources = new FloorEffectSourceTracker();
+            _contributionTracker = new ContributionTracker(_floorEffectSources);
+            _tracker = new DamageTracker(_floorEffectSources);
             _ui = new DamageMeterUI(_tracker, _contributionTracker);
 
-            _logTracker = new CombatLogTracker();
+            _logTracker = new CombatLogTracker(_floorEffectSources);
             _logUi = new CombatLogUI(_logTracker);
             _statusLogUi = new StatusLogUI(_logTracker);
 
@@ -209,6 +231,7 @@ namespace DD2DamageMeter
             }
             if (input.GetKeyDown(KeyCode.F3))
             {
+                _floorEffectSources.Reset();
                 _tracker.Reset();
                 _contributionTracker.Reset();
                 Log.LogInfo("Damage stats reset.");
@@ -224,6 +247,13 @@ namespace DD2DamageMeter
             try
             {
                 // Stats tracker
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventBattleStartRound>(evt => _floorEffectSources.OnBattleStartRound(evt.m_Round), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Skill.Events.EventSkillFinalizeResults>(evt => _floorEffectSources.OnSkillFinalizeResults(evt), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Token.Events.EventTokenAdded>(evt => _floorEffectSources.OnTokenAdded(evt), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Token.Events.EventTokenReplaced>(evt => _floorEffectSources.OnTokenReplaced(evt), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Buff.Events.EventBuffAdded>(evt => _floorEffectSources.OnBuffAdded(evt), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Dot.Events.EventDotAdded>(evt => _floorEffectSources.OnDotAdded(evt), false, 0);
+
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Actor.Events.EventActorHealthDamage>(evt => _tracker.OnHealthDamage(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Actor.Events.EventActorHealthHeal>(evt => _tracker.OnHealthHeal(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventStressDamage>(evt => _tracker.OnStressDamage(evt), false, 0);
@@ -280,6 +310,7 @@ namespace DD2DamageMeter
                 _runTracker.CaptureBattle(_tracker, _contributionTracker);
             }
             _battleActive = true;
+            _floorEffectSources.Reset();
             _tracker.OnBattleBegin(evt);
             _contributionTracker.OnBattleBegin(evt);
         }
@@ -433,6 +464,7 @@ namespace DD2DamageMeter
                     s.VulnerableDamage > 0.01f ||
                     s.ShieldPrevented > 0.01f ||
                     s.GuardProtected > 0.01f ||
+                    s.DotDamagePrevented > 0.01f ||
                     s.ComboApplied > 0 ||
                     s.ComboConsumed > 0)
                 {
@@ -523,15 +555,15 @@ namespace DD2DamageMeter
                         }
                     }
                     writer.WriteLine(DmText.T("contribution"));
-                    writer.WriteLine($"{DmText.T("name"),-22} {DmText.T("contrib"),8} {DmText.T("dmgPlus"),8} {DmText.T("vulnerable"),8} {DmText.T("shield"),8} {DmText.T("guard"),8} {DmText.T("comboConsumed"),8} {DmText.T("pct"),6}");
-                    writer.WriteLine(new string('-', 82));
+                    writer.WriteLine($"{DmText.T("name"),-22} {DmText.T("contrib"),8} {DmText.T("dmgPlus"),8} {DmText.T("vulnerable"),8} {DmText.T("shield"),8} {DmText.T("guard"),8} {DmText.T("dotPrevented"),8} {DmText.T("comboConsumed"),8} {DmText.T("pct"),6}");
+                    writer.WriteLine(new string('-', 92));
                     if (hasContribution)
                     {
                         foreach (var s in contributionStats)
                         {
                             if (s.TotalContribution <= 0.01f && s.ComboConsumed <= 0) continue;
                             float pct = totalContribution > 0 ? s.TotalContribution / totalContribution * 100f : 0f;
-                            writer.WriteLine($"{s.ActorName,-22} {s.TotalContribution,8:F1} {s.BonusDamage,8:F1} {s.VulnerableDamage,8:F1} {s.ShieldPrevented,8:F1} {s.GuardProtected,8:F1} {s.ComboConsumed,8} {pct,5:F1}%");
+                            writer.WriteLine($"{s.ActorName,-22} {s.TotalContribution,8:F1} {s.BonusDamage,8:F1} {s.VulnerableDamage,8:F1} {s.ShieldPrevented,8:F1} {s.GuardProtected,8:F1} {s.DotDamagePrevented,8:F1} {s.ComboConsumed,8} {pct,5:F1}%");
                         }
                     }
                     else

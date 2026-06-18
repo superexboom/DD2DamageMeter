@@ -7,18 +7,29 @@
     <LangVersion>latest</LangVersion>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <OutputPath>bin\$(Configuration)\</OutputPath>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="*.cs" />
+  </ItemGroup>
 
   <ItemGroup>
     <Compile Remove="IronCrown\**\*.cs" />
     <Compile Remove="DD2SteamMultiplayerDoorstop\**\*.cs" />
     <Compile Remove="DD2SteamMultiplayerHost\**\*.cs" />
     <Compile Remove="DD2SteamMultiplayerRuntime\**\*.cs" />
+    <Compile Remove="DD2DebugDemoCore\**\*.cs" />
     <Compile Remove="SteamMultiplayerPrototype\**\*.cs" />
     <Compile Remove="DebugActorPlus\**\*.cs" />
     <Compile Remove="ItemSpawnerPlus\**\*.cs" />
     <Compile Remove="PartyBuilderPlus\**\*.cs" />
+    <Compile Remove="DD2CheatPanel\**\*.cs" />
+    <Compile Remove="DD2SeedLocker\**\*.cs" />
+    <Compile Remove="DD2DamageMeterAdvancedStats\**\*.cs" />
     <Compile Remove="artifacts\**\*.cs" />
+    <Compile Remove="bin\**\*.cs" />
+    <Compile Remove="obj\**\*.cs" />
   </ItemGroup>
 
   <!-- BepInEx -->

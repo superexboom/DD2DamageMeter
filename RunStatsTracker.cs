@@ -45,10 +45,11 @@ namespace DD2DamageMeter
             public float VulnerableDamageContribution;
             public float ShieldContribution;
             public float GuardContribution;
+            public float DotDamagePreventedContribution;
             public int ShieldWasted;
             public int ComboApplied;
             public int ComboConsumed;
-            public float TotalContribution => BonusDamageContribution + VulnerableDamageContribution + ShieldContribution + GuardContribution;
+            public float TotalContribution => BonusDamageContribution + VulnerableDamageContribution + ShieldContribution + GuardContribution + DotDamagePreventedContribution;
         }
 
         private readonly List<BattleSnapshot> _snapshots = new List<BattleSnapshot>();
@@ -234,6 +235,7 @@ namespace DD2DamageMeter
                     s.VulnerableDamage > 0.01f ||
                     s.ShieldPrevented > 0.01f ||
                     s.GuardProtected > 0.01f ||
+                    s.DotDamagePrevented > 0.01f ||
                     s.ComboApplied > 0 ||
                     s.ComboConsumed > 0)
                 {
@@ -291,6 +293,7 @@ namespace DD2DamageMeter
                     VulnerableDamage = s.VulnerableDamage,
                     ShieldPrevented = s.ShieldPrevented,
                     GuardProtected = s.GuardProtected,
+                    DotDamagePrevented = s.DotDamagePrevented,
                     ShieldWasted = s.ShieldWasted,
                     ComboApplied = s.ComboApplied,
                     ComboConsumed = s.ComboConsumed
@@ -349,6 +352,7 @@ namespace DD2DamageMeter
                     VulnerableDamage = s.VulnerableDamage,
                     ShieldPrevented = s.ShieldPrevented,
                     GuardProtected = s.GuardProtected,
+                    DotDamagePrevented = s.DotDamagePrevented,
                     ShieldWasted = s.ShieldWasted,
                     ComboApplied = s.ComboApplied,
                     ComboConsumed = s.ComboConsumed
@@ -458,6 +462,7 @@ namespace DD2DamageMeter
                     s.VulnerableDamage <= 0.01f &&
                     s.ShieldPrevented <= 0.01f &&
                     s.GuardProtected <= 0.01f &&
+                    s.DotDamagePrevented <= 0.01f &&
                     s.ComboApplied <= 0 &&
                     s.ComboConsumed <= 0)
                 {
@@ -479,6 +484,7 @@ namespace DD2DamageMeter
                 merged.VulnerableDamageContribution += s.VulnerableDamage;
                 merged.ShieldContribution += s.ShieldPrevented;
                 merged.GuardContribution += s.GuardProtected;
+                merged.DotDamagePreventedContribution += s.DotDamagePrevented;
                 merged.ComboApplied += s.ComboApplied;
                 merged.ComboConsumed += s.ComboConsumed;
             }
@@ -588,7 +594,7 @@ namespace DD2DamageMeter
                     {
                         if (s.TotalContribution <= 0.01f && s.ComboConsumed <= 0) continue;
                         float pct = totalContribution > 0f ? s.TotalContribution / totalContribution * 100f : 0f;
-                        writer.WriteLine($"\"{s.ActorName}\",{s.TotalContribution:F1},{s.BonusDamageContribution:F1},{s.VulnerableDamageContribution:F1},{s.ShieldContribution:F1},{s.GuardContribution:F1},{s.ComboConsumed},{pct:F1}");
+                        writer.WriteLine($"\"{s.ActorName}\",{s.TotalContribution:F1},{s.BonusDamageContribution:F1},{s.VulnerableDamageContribution:F1},{s.ShieldContribution:F1},{s.GuardContribution:F1},{s.DotDamagePreventedContribution:F1},{s.ComboConsumed},{pct:F1}");
                     }
                     writer.WriteLine();
 
@@ -629,7 +635,7 @@ namespace DD2DamageMeter
                             {
                                 if (s.TotalContribution <= 0.01f && s.ComboConsumed <= 0) continue;
                                 float pct = battleContribution > 0f ? s.TotalContribution / battleContribution * 100f : 0f;
-                                writer.WriteLine($"\"{s.ActorName}\",{s.TotalContribution:F1},{s.BonusDamage:F1},{s.VulnerableDamage:F1},{s.ShieldPrevented:F1},{s.GuardProtected:F1},{s.ComboConsumed},{pct:F1}");
+                                writer.WriteLine($"\"{s.ActorName}\",{s.TotalContribution:F1},{s.BonusDamage:F1},{s.VulnerableDamage:F1},{s.ShieldPrevented:F1},{s.GuardProtected:F1},{s.DotDamagePrevented:F1},{s.ComboConsumed},{pct:F1}");
                             }
                         }
                         writer.WriteLine();
