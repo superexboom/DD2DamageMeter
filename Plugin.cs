@@ -13,7 +13,7 @@ namespace DD2DamageMeter
     {
         private const string PluginGuid = "com.dd2.damagemeter";
         private const string PluginName = "DD2 Damage Meter";
-        private const string PluginVersion = "1.4.19";
+        private const string PluginVersion = "1.4.20";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance { get; private set; }
@@ -257,6 +257,7 @@ namespace DD2DamageMeter
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Actor.Events.EventActorHealthDamage>(evt => _tracker.OnHealthDamage(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Actor.Events.EventActorHealthHeal>(evt => _tracker.OnHealthHeal(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventStressDamage>(evt => _tracker.OnStressDamage(evt), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventStressHeal>(evt => _tracker.OnStressHeal(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Skill.Events.EventSkillFinalizeResults>(evt => _tracker.OnSkillFinalizeResults(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Actor.Events.EventActorDeath>(evt => _tracker.OnActorDeath(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventBattleBegin>(evt => OnBattleBegin(evt), false, 0);
@@ -522,6 +523,8 @@ namespace DD2DamageMeter
                     }
                     writer.WriteLine();
 
+                    WriteSkillStressHealReport(writer, playerStats);
+
                     // Enemies section
                     var enemyStats = _tracker.EnemyStats;
                     float enemyTotal = _tracker.EnemyTotalDamage;
@@ -664,6 +667,36 @@ namespace DD2DamageMeter
             }
 
             return 0;
+        }
+
+        private static void WriteSkillStressHealReport(System.IO.StreamWriter writer, IReadOnlyList<DamageTracker.ActorStats> playerStats)
+        {
+            if (!HasSkillStressHealStats(playerStats)) return;
+
+            writer.WriteLine(DmText.T("sectionSkillStressHeal"));
+            writer.WriteLine($"{DmText.T("name"),-22} {DmText.T("skillStressHealCount"),8} {DmText.T("skillStressHeal"),8}");
+            writer.WriteLine(new string('-', 42));
+            for (int i = 0; i < playerStats.Count; i++)
+            {
+                DamageTracker.ActorStats s = playerStats[i];
+                if (s == null || (s.SkillStressHealReceived <= 0.01f && s.SkillStressHealReceivedCount <= 0)) continue;
+                writer.WriteLine($"{s.ActorName,-22} {s.SkillStressHealReceivedCount,8} {s.SkillStressHealReceived,8:F1}");
+            }
+            writer.WriteLine();
+        }
+
+        private static bool HasSkillStressHealStats(IReadOnlyList<DamageTracker.ActorStats> playerStats)
+        {
+            if (playerStats == null) return false;
+            for (int i = 0; i < playerStats.Count; i++)
+            {
+                DamageTracker.ActorStats s = playerStats[i];
+                if (s != null && (s.SkillStressHealReceived > 0.01f || s.SkillStressHealReceivedCount > 0))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
 
         private void ExportRunCsv()

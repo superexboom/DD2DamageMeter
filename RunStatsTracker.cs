@@ -33,6 +33,8 @@ namespace DD2DamageMeter
             public float TotalHealingDone;
             public float TotalHealingReceived;
             public float TotalStressReceived;
+            public float SkillStressHealReceived;
+            public int SkillStressHealReceivedCount;
             public int Kills;
             public int Crits;
             public int IncomingAttacks;
@@ -210,6 +212,8 @@ namespace DD2DamageMeter
                     s.TotalHealingDone > 0.01f ||
                     s.TotalHealingReceived > 0.01f ||
                     s.TotalStressReceived > 0.01f ||
+                    s.SkillStressHealReceived > 0.01f ||
+                    s.SkillStressHealReceivedCount > 0 ||
                     s.Kills > 0 ||
                     s.Crits > 0 ||
                     s.IncomingAttacks > 0 ||
@@ -264,6 +268,8 @@ namespace DD2DamageMeter
                     TotalHealingDone = s.TotalHealingDone,
                     TotalHealingReceived = s.TotalHealingReceived,
                     TotalStressReceived = s.TotalStressReceived,
+                    SkillStressHealReceived = s.SkillStressHealReceived,
+                    SkillStressHealReceivedCount = s.SkillStressHealReceivedCount,
                     Kills = s.Kills,
                     Crits = s.Crits,
                     IncomingAttacks = s.IncomingAttacks,
@@ -322,6 +328,8 @@ namespace DD2DamageMeter
                     TotalHealingDone = s.TotalHealingDone,
                     TotalHealingReceived = s.TotalHealingReceived,
                     TotalStressReceived = s.TotalStressReceived,
+                    SkillStressHealReceived = s.SkillStressHealReceived,
+                    SkillStressHealReceivedCount = s.SkillStressHealReceivedCount,
                     Kills = s.Kills,
                     Crits = s.Crits,
                     IncomingAttacks = s.IncomingAttacks,
@@ -442,6 +450,8 @@ namespace DD2DamageMeter
                 merged.TotalHealingDone += s.TotalHealingDone;
                 merged.TotalHealingReceived += s.TotalHealingReceived;
                 merged.TotalStressReceived += s.TotalStressReceived;
+                merged.SkillStressHealReceived += s.SkillStressHealReceived;
+                merged.SkillStressHealReceivedCount += s.SkillStressHealReceivedCount;
                 merged.Kills += s.Kills;
                 merged.Crits += s.Crits;
                 merged.IncomingAttacks += s.IncomingAttacks;
@@ -565,6 +575,9 @@ namespace DD2DamageMeter
                     }
                     writer.WriteLine();
 
+                    WriteSkillStressHealSummary(writer, players);
+                    writer.WriteLine();
+
                     // Enemies
                     writer.WriteLine(DmText.T("sectionEnemies"));
                     writer.WriteLine(DmText.T("csvHeroesHeader"));
@@ -614,6 +627,7 @@ namespace DD2DamageMeter
                             foreach (var s in snap.EnemyStats)
                                 writer.WriteLine($"{DmText.T("csvEnemy")},\"{s.ActorName}\",{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids},0");
                         }
+                        WriteSkillStressHealBattleSummary(writer, snap.PlayerStats);
                         if (snap.ContributionStats != null && HasAnyContributionStats(snap.ContributionStats))
                         {
                             writer.WriteLine(DmText.T("contribution"));
@@ -647,6 +661,60 @@ namespace DD2DamageMeter
             {
                 Plugin.Log.LogWarning($"RunStatsTracker.ExportCsv error: {ex.Message}");
             }
+        }
+
+        private static void WriteSkillStressHealSummary(StreamWriter writer, List<MergedStats> players)
+        {
+            if (!HasAnySkillStressHealStats(players)) return;
+
+            writer.WriteLine(DmText.T("sectionSkillStressHeal"));
+            writer.WriteLine(DmText.T("csvSkillStressHealHeader"));
+            foreach (var s in players)
+            {
+                if (s == null || (s.SkillStressHealReceived <= 0.01f && s.SkillStressHealReceivedCount <= 0)) continue;
+                writer.WriteLine($"\"{s.ActorName}\",{s.BattlesSeen},{s.SkillStressHealReceivedCount},{s.SkillStressHealReceived:F1}");
+            }
+        }
+
+        private static void WriteSkillStressHealBattleSummary(StreamWriter writer, List<DamageTracker.ActorStats> players)
+        {
+            if (!HasAnySkillStressHealStats(players)) return;
+
+            writer.WriteLine(DmText.T("sectionSkillStressHeal"));
+            writer.WriteLine(DmText.T("csvSkillStressHealBattleHeader"));
+            foreach (var s in players)
+            {
+                if (s == null || (s.SkillStressHealReceived <= 0.01f && s.SkillStressHealReceivedCount <= 0)) continue;
+                writer.WriteLine($"\"{s.ActorName}\",{s.SkillStressHealReceivedCount},{s.SkillStressHealReceived:F1}");
+            }
+        }
+
+        private static bool HasAnySkillStressHealStats(List<MergedStats> players)
+        {
+            if (players == null) return false;
+            for (int i = 0; i < players.Count; i++)
+            {
+                var s = players[i];
+                if (s != null && (s.SkillStressHealReceived > 0.01f || s.SkillStressHealReceivedCount > 0))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static bool HasAnySkillStressHealStats(List<DamageTracker.ActorStats> players)
+        {
+            if (players == null) return false;
+            for (int i = 0; i < players.Count; i++)
+            {
+                var s = players[i];
+                if (s != null && (s.SkillStressHealReceived > 0.01f || s.SkillStressHealReceivedCount > 0))
+                {
+                    return true;
+                }
+            }
+            return false;
         }
     }
 }

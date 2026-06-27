@@ -148,6 +148,8 @@ namespace DD2DamageMeter
                 TotalHealingDone = stats.TotalHealingDone,
                 TotalHealingReceived = stats.TotalHealingReceived,
                 TotalStressReceived = stats.TotalStressReceived,
+                SkillStressHealReceived = stats.SkillStressHealReceived,
+                SkillStressHealReceivedCount = stats.SkillStressHealReceivedCount,
                 Kills = stats.Kills,
                 Crits = stats.Crits,
                 IncomingAttacks = stats.IncomingAttacks,
@@ -304,6 +306,8 @@ namespace DD2DamageMeter
                     .Append(FormatFloat(row.TotalHealingDone)).Append(',')
                     .Append(FormatFloat(row.TotalHealingReceived)).Append(',')
                     .Append(FormatFloat(row.TotalStressReceived)).Append(',')
+                    .Append(FormatFloat(row.SkillStressHealReceived)).Append(',')
+                    .Append(row.SkillStressHealReceivedCount).Append(',')
                     .Append(row.Kills).Append(',')
                     .Append(row.Crits).Append(',')
                     .Append(row.IncomingAttacks).Append(',')
@@ -472,6 +476,8 @@ namespace DD2DamageMeter
                     TotalHealingDone = GetFloat(item, "TotalHealingDone", 0f),
                     TotalHealingReceived = GetFloat(item, "TotalHealingReceived", 0f),
                     TotalStressReceived = GetFloat(item, "TotalStressReceived", 0f),
+                    SkillStressHealReceived = GetFloat(item, "SkillStressHealReceived", 0f),
+                    SkillStressHealReceivedCount = GetInt(item, "SkillStressHealReceivedCount", 0),
                     Kills = GetInt(item, "Kills", 0),
                     Crits = GetInt(item, "Crits", 0),
                     IncomingAttacks = GetInt(item, "IncomingAttacks", 0),
@@ -592,6 +598,8 @@ namespace DD2DamageMeter
                 TotalHealingDone = source.TotalHealingDone,
                 TotalHealingReceived = source.TotalHealingReceived,
                 TotalStressReceived = source.TotalStressReceived,
+                SkillStressHealReceived = source.SkillStressHealReceived,
+                SkillStressHealReceivedCount = source.SkillStressHealReceivedCount,
                 Kills = source.Kills,
                 Crits = source.Crits,
                 IncomingAttacks = source.IncomingAttacks,
@@ -794,6 +802,8 @@ namespace DD2DamageMeter
         public float TotalHealingDone { get; set; }
         public float TotalHealingReceived { get; set; }
         public float TotalStressReceived { get; set; }
+        public float SkillStressHealReceived { get; set; }
+        public int SkillStressHealReceivedCount { get; set; }
         public int Kills { get; set; }
         public int Crits { get; set; }
         public int IncomingAttacks { get; set; }

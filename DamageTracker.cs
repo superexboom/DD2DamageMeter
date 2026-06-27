@@ -29,6 +29,8 @@ namespace DD2DamageMeter
             public float TotalHealingDone;
             public float TotalHealingReceived;
             public float TotalStressReceived;
+            public float SkillStressHealReceived;
+            public int SkillStressHealReceivedCount;
             public int Kills;
             public int Crits;
             public int IncomingAttacks;
@@ -504,6 +506,32 @@ namespace DD2DamageMeter
         {
             try { lock (_lock) { var s = GetOrCreate(evt.m_ActorGuid, evt.m_TeamIndex); s.TotalStressReceived += evt.m_StressDamageAmount; UpdateAndMarkDirty(); } }
             catch (Exception ex) { Plugin.Log.LogWarning($"OnStressDamage error: {ex.Message}"); }
+        }
+
+        public void OnStressHeal(EventStressHeal evt)
+        {
+            try
+            {
+                if (evt == null ||
+                    evt.m_TeamIndex != 0 ||
+                    evt.m_StressHealAmount <= 0.01f ||
+                    evt.m_SourceType != SourceType.SKILL)
+                {
+                    return;
+                }
+
+                lock (_lock)
+                {
+                    var s = GetOrCreate(evt.m_ActorGuid, evt.m_TeamIndex);
+                    s.SkillStressHealReceived += evt.m_StressHealAmount;
+                    s.SkillStressHealReceivedCount++;
+                    UpdateAndMarkDirty();
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"OnStressHeal error: {ex.Message}");
+            }
         }
 
         public void OnSkillFinalizeResults(EventSkillFinalizeResults evt)

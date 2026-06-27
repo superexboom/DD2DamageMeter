@@ -175,11 +175,14 @@ namespace DD2DamageMeter
                 case "sectionBattleLog": return "--- Battle Log ---";
                 case "sectionStatusSummary": return "--- Buff/Debuff Summary ---";
                 case "sectionStatusLog": return "--- Buff/Debuff Log ---";
+                case "sectionSkillStressHeal": return "--- Skill Stress Relief Received ---";
                 case "noContribution": return "No contribution recorded.";
                 case "csvTitle": return "=== Run Stats CSV Export ===";
                 case "battlesRecorded": return "Battles Recorded: {0}";
                 case "exported": return "Exported: {0:yyyy-MM-dd HH:mm:ss}";
                 case "csvHeroesHeader": return "Name,Battles,TotalDMG,DOT_DMG,OVK_DMG,RawDMG_Taken,ActualDMG_Taken,HealingDone,HealingReceived,Stress,Kills,Crits,AvoidRate,AvoidChecks,AvoidedAttacks,DodgeAvoids,MissAvoids,ComboApplied";
+                case "csvSkillStressHealHeader": return "Name,Battles,SkillStressHealCount,SkillStressHeal";
+                case "csvSkillStressHealBattleHeader": return "Name,SkillStressHealCount,SkillStressHeal";
                 case "csvContributionHeader": return "Name,TotalContribution,BonusDamage,VulnerableDamage,ShieldPrevented,GuardProtected,DotDamagePrevented,ComboConsumed,ContributionPct";
                 case "csvPerBattle": return "--- Per Battle Breakdown ---";
                 case "csvBattle": return "Battle #{0} ({1:HH:mm:ss})";
@@ -194,6 +197,8 @@ namespace DD2DamageMeter
                 case "rawTkn": return "RawTkn";
                 case "healOut": return "Heal+";
                 case "healIn": return "HealIn";
+                case "skillStressHeal": return "Stress-";
+                case "skillStressHealCount": return "Stress-#";
                 case "kills": return "Kills";
                 case "crits": return "Crits";
                 case "avoidPct": return "Avoid%";
@@ -270,11 +275,14 @@ namespace DD2DamageMeter
                 case "sectionBattleLog": return "--- 战斗日志 ---";
                 case "sectionStatusSummary": return "--- Buff/Debuff 汇总 ---";
                 case "sectionStatusLog": return "--- Buff/Debuff 日志 ---";
+                case "sectionSkillStressHeal": return "--- 技能减压统计 ---";
                 case "noContribution": return "没有记录到贡献。";
                 case "csvTitle": return "=== 本局统计 CSV 导出 ===";
                 case "battlesRecorded": return "录制战斗数：{0}";
                 case "exported": return "导出时间：{0:yyyy-MM-dd HH:mm:ss}";
                 case "csvHeroesHeader": return "名称,战斗数,总伤害,DOT伤害,溢出伤害,理论承伤,实际承伤,造成治疗,受到治疗,压力,击杀,暴击,闪避率,受击判定,闪避次数,闪避Token,致盲Miss,有效Combo";
+                case "csvSkillStressHealHeader": return "名称,战斗数,技能减压次数,技能减压量";
+                case "csvSkillStressHealBattleHeader": return "名称,技能减压次数,技能减压量";
                 case "csvContributionHeader": return "名称,总贡献,增伤贡献,易伤贡献,减伤贡献,守护贡献,阻止DOT伤害,Combo消耗贡献,贡献占比";
                 case "csvPerBattle": return "--- 单场明细 ---";
                 case "csvBattle": return "第 {0} 场（{1:HH:mm:ss}）";
@@ -289,6 +297,8 @@ namespace DD2DamageMeter
                 case "rawTkn": return "承伤";
                 case "healOut": return "治疗";
                 case "healIn": return "受疗";
+                case "skillStressHeal": return "减压量";
+                case "skillStressHealCount": return "减压次";
                 case "kills": return "击杀";
                 case "crits": return "暴击";
                 case "avoidPct": return "闪避%";
