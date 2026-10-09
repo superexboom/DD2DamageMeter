@@ -312,6 +312,8 @@ namespace DD2DamageMeter
         public uint ResolveDotSource(ActorInstance targetActor, string dotId, string dotType, uint currentSourceActorGuid, SourceType sourceType, string sourceId)
         {
             if (targetActor?.DotContainer == null) return 0;
+            // Floor ticks report the target as their source; preserve real external sources.
+            if (currentSourceActorGuid != 0 && currentSourceActorGuid != targetActor.ActorGuid) return 0;
             lock (_lock)
             {
                 var instance = FindNewestMarkedDot(targetActor, dotId, dotType, sourceType, sourceId);
@@ -327,10 +329,6 @@ namespace DD2DamageMeter
                 }
 
                 if (marker == null || marker.ProviderGuid == 0)
-                    return 0;
-
-                uint targetGuid = targetActor.ActorGuid;
-                if (currentSourceActorGuid != 0 && currentSourceActorGuid != targetGuid && currentSourceActorGuid == marker.ProviderGuid)
                     return 0;
 
                 return marker.ProviderGuid;
@@ -395,11 +393,16 @@ namespace DD2DamageMeter
                     explicitMatch = ContainsIgnoreCase(placement.DotIds, statusId) ||
                                     (ContainsIgnoreCase(placement.DotTypes, dotType) && PlacementSourceMatches(placement, sourceType, sourceId));
 
-                if (explicitMatch) return placement;
+                if (explicitMatch)
+                {
+                    placement.Round = Math.Max(1, _currentRound);
+                    return placement;
+                }
                 if (sourceMatch == null && PlacementSourceMatches(placement, sourceType, sourceId))
                     sourceMatch = placement;
             }
 
+            if (sourceMatch != null) sourceMatch.Round = Math.Max(1, _currentRound);
             return sourceMatch;
         }
 
@@ -919,7 +922,8 @@ namespace DD2DamageMeter
         private static bool DotDefinitionIdOrTypeMatches(DotDefinition dot, string dotId, string dotType)
         {
             if (dot == null) return false;
-            return NonEmptyIdMatches(dot.m_Id, dotId) || DotTypeMatches(dot.m_Type, dotType);
+            if (!string.IsNullOrEmpty(dotId)) return NonEmptyIdMatches(dot.m_Id, dotId);
+            return DotTypeMatches(dot.m_Type, dotType);
         }
 
         private static bool DotTypeMatches(string left, string right)

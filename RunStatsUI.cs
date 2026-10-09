@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using UnityEngine;
 
@@ -45,7 +46,7 @@ namespace DD2DamageMeter
         private const float COL_DOT_PREVENTED = 66f;
         private const float COL_CONTRIB_PCT = 46f;
 
-        private static readonly string[] HeaderKeys = { "name", "bat", "dmg", "dot", "ovk", "rawTkn", "healOut", "healIn", "kills", "crits", "avoidPct", "comboApplied", "pct" };
+        private static readonly string[] HeaderKeys = { "name", "bat", "dmg", "dot", "ovk", "rawTkn", "healOut", "healIn", "kills", "crits", "avoidCount", "comboApplied", "pct" };
         private static readonly float[] FixedWidths = { 0f, COL_BATTLES, COL_DMG, COL_DOT, COL_OVK, COL_TAKEN, COL_HEAL_OUT, COL_HEAL_IN, COL_KILLS, COL_CRITS, COL_AVOID, COL_COMBO_APPLIED, COL_PCT };
 
         // Scale
@@ -55,6 +56,7 @@ namespace DD2DamageMeter
         private int _styleVersion = -1;
 
         public bool IsVisible { get; set; }
+        public Func<bool> IsBattleActive;
 
         public RunStatsUI(RunStatsTracker t, DamageTracker damageTracker, ContributionTracker contributionTracker = null)
         {
@@ -91,9 +93,9 @@ namespace DD2DamageMeter
             int settingsVersion = DamageMeterUiSettings.Version;
             if (_init && _styleVersion == settingsVersion) return;
 
-            _windowBgTex = MakeTex(2, 2, new Color(0f, 0f, 0f, 0.35f));
-            _headerBgTex = MakeTex(2, 2, new Color(0f, 0f, 0f, 0.18f));
-            _rowAltTex = MakeTex(2, 2, new Color(0f, 0f, 0f, 0.1f));
+            _windowBgTex = MakeTex(2, 2, new Color(0.06f, 0.05f, 0.04f, 0.55f));
+            _headerBgTex = MakeTex(2, 2, new Color(0.12f, 0.10f, 0.06f, 0.3f));
+            _rowAltTex = MakeTex(2, 2, new Color(0f, 0f, 0f, 0.08f));
 
             _windowStyle = new GUIStyle(GUI.skin.window);
             _windowStyle.normal.background = _windowBgTex;
@@ -163,6 +165,7 @@ namespace DD2DamageMeter
 
             _rect = GUI.Window(729003, _rect, Win, DmText.T("runStatsTitle"), _windowStyle);
             _rect = UiUtil.ClampToScreen(_rect, _scaleFactor);
+            UiInputBlocker.RegisterRect(_rect, _scaleFactor);
 
             GUI.matrix = prevMatrix;
 
@@ -179,9 +182,12 @@ namespace DD2DamageMeter
         private void Win(int id)
         {
             bool remoteMode = DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out var remoteSnapshot);
-            DamageTracker currentTracker = remoteMode ? null : _damageTracker;
-            ContributionTracker currentContribution = remoteMode ? null : _contributionTracker;
-            int battleCount = _runTracker.GetBattleCount(currentTracker, currentContribution, remoteMode ? remoteSnapshot : null);
+            bool includeLocalBattle = !remoteMode && (IsBattleActive?.Invoke() ?? false);
+            bool includeRemoteBattle = remoteMode && Plugin.IsRemoteCombatActive(remoteSnapshot);
+            DamageTracker currentTracker = includeLocalBattle ? _damageTracker : null;
+            ContributionTracker currentContribution = includeLocalBattle ? _contributionTracker : null;
+            DamageMeterMpSnapshot currentRemote = includeRemoteBattle ? remoteSnapshot : null;
+            int battleCount = _runTracker.GetBattleCount(currentTracker, currentContribution, currentRemote);
             if (battleCount == 0)
             {
                 GUILayout.Label(DmText.T("noBattles"), _labelStyle);
@@ -190,7 +196,7 @@ namespace DD2DamageMeter
                 return;
             }
 
-            var (players, enemies) = _runTracker.GetMergedStats(currentTracker, currentContribution, remoteMode ? remoteSnapshot : null);
+            var (players, enemies) = _runTracker.GetMergedStats(currentTracker, currentContribution, currentRemote);
             float scrollH = _h - U(40f);
             float nameW = GetNameWidth();
 
@@ -224,7 +230,7 @@ namespace DD2DamageMeter
             GUILayout.EndScrollView();
 
             if (GUILayout.Button(DmText.T("close"), GUILayout.Width(U(60f)))) IsVisible = false;
-            GUI.Label(new Rect(_w - U(RESIZE_HANDLE) - U(2), _h - U(RESIZE_HANDLE) - U(2), U(RESIZE_HANDLE), U(RESIZE_HANDLE)), "\u255a", _resizeStyle);
+            // Resize handle icon hidden; functionality preserved in Draw()
             GUI.DragWindow(new Rect(0, 0, _w, _h - U(RESIZE_HANDLE)));
         }
 
@@ -272,7 +278,7 @@ namespace DD2DamageMeter
             GUI.Label(new Rect(x, y, U(COL_HEAL_IN), h), s.TotalHealingReceived > 0 ? $"{s.TotalHealingReceived:F0}" : "-", _valueStyle); x += U(COL_HEAL_IN);
             GUI.Label(new Rect(x, y, U(COL_KILLS), h), s.Kills > 0 ? $"{s.Kills}" : "-", _valueStyle); x += U(COL_KILLS);
             GUI.Label(new Rect(x, y, U(COL_CRITS), h), s.Crits > 0 ? $"{s.Crits}" : "-", _valueStyle); x += U(COL_CRITS);
-            GUI.Label(new Rect(x, y, U(COL_AVOID), h), UiUtil.FormatAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks), _valueStyle); x += U(COL_AVOID);
+            GUI.Label(new Rect(x, y, U(COL_AVOID), h), s.AvoidedAttacks > 0 ? $"{s.AvoidedAttacks}" : "-", _valueStyle); x += U(COL_AVOID);
             GUI.Label(new Rect(x, y, U(COL_COMBO_APPLIED), h), s.ComboApplied > 0 ? $"{s.ComboApplied}" : "-", _valueStyle); x += U(COL_COMBO_APPLIED);
             float pct = totalDmg > 0 ? s.TotalDamageDealt / totalDmg * 100f : 0f;
             GUI.Label(new Rect(x, y, U(COL_PCT), h), $"{pct:F1}%", _valueStyle);

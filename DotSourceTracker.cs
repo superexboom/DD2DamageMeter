@@ -97,6 +97,10 @@ namespace DD2DamageMeter
 
         public List<Share> GetShares(uint targetGuid, string dotType, EffectApplyCombinedResult result, float rawAmount, float effectiveAmount)
         {
+            List<DotTickCapture> captures = DotTickCaptureStore.GetShares(result);
+            if (captures.Count > 0)
+                return BuildCapturedShares(captures, rawAmount, effectiveAmount);
+
             var matching = new List<ActiveDot>();
             for (int i = 0; i < _activeDots.Count; i++)
             {
@@ -128,6 +132,36 @@ namespace DD2DamageMeter
                 acc.Weight += weight;
             }
 
+            return BuildShares(grouped.Values, totalWeight, rawAmount, effectiveAmount);
+        }
+
+        private static List<Share> BuildCapturedShares(List<DotTickCapture> captures, float rawAmount, float effectiveAmount)
+        {
+            var grouped = new Dictionary<uint, ShareAccumulator>();
+            float totalWeight = 0f;
+            for (int i = 0; i < captures.Count; i++)
+            {
+                DotTickCapture capture = captures[i];
+                if (capture == null || capture.RawAmount <= 0.0001f) continue;
+
+                float weight = capture.RawAmount;
+                totalWeight += weight;
+                if (!grouped.TryGetValue(capture.SourceActorGuid, out var acc))
+                {
+                    acc = new ShareAccumulator
+                    {
+                        SourceActorGuid = capture.SourceActorGuid,
+                        SourceId = capture.SourceId ?? ""
+                    };
+                    grouped[capture.SourceActorGuid] = acc;
+                }
+                if (string.IsNullOrEmpty(acc.SourceId) && !string.IsNullOrEmpty(capture.SourceId))
+                    acc.SourceId = capture.SourceId;
+                acc.Weight += weight;
+            }
+
+            if (totalWeight <= 0f)
+                return new List<Share>();
             return BuildShares(grouped.Values, totalWeight, rawAmount, effectiveAmount);
         }
 

@@ -13,7 +13,7 @@ namespace DD2DamageMeter
     {
         private const string PluginGuid = "com.dd2.damagemeter";
         private const string PluginName = "DD2 Damage Meter";
-        private const string PluginVersion = "1.4.20";
+        private const string PluginVersion = "1.4.31";
 
         internal static ManualLogSource Log;
         internal static Plugin Instance { get; private set; }
@@ -31,6 +31,8 @@ namespace DD2DamageMeter
         private RunStatsUI _runUi;
         private ContributionTracker _contributionTracker;
         private ConfigEntry<bool> _autoStartRecording;
+        private ConfigEntry<bool> _autoShowInBattle;
+        private ConfigEntry<bool> _autoShowOutsideBattle;
         private ConfigEntry<string> _exportDirectory;
         private ConfigEntry<string> _language;
         private ConfigEntry<int> _uiFontSize;
@@ -38,11 +40,39 @@ namespace DD2DamageMeter
         private bool _eventManagerReady;
         private float _checkTimer;
         private bool _battleActive;
-        private bool _overlayHidden;
+        private bool _overlayHidden = true;
+        private bool? _remoteOverlayBattleActive;
         private bool _autoStartPending;
         private bool _remoteBattleActive;
         private DamageMeterMpSnapshot _lastRemoteBattleSnapshot;
         private string _lastRemoteCapturedDigest;
+        private RunStatsTracker.BattleSnapshot _lastCompletedBattleSnapshot;
+        private uint _currentProfileGuid;
+        private Guid _currentRunGuid;
+        private bool _runIdentityBound;
+        private bool _runContextActive;
+        private bool _awaitingNewRunIdentity;
+        private bool _runContainsRemoteBattles;
+        private bool _undoRestoreInProgress;
+        private string _undoRestoreId;
+        private long _undoRestoreEpoch;
+        private Assets.Code.Combat.CombatManager _gameCombatManager;
+        private int _activeGameCombatCount;
+        private Guid _activeGameCombatGuid;
+        private bool _resumeCheckpointAvailable;
+        private int _resumeCheckpointCombatCount;
+        private Guid _resumeCheckpointCombatGuid;
+        private bool _resumeCheckpointInCombat;
+        private RunStatsTracker.PersistedRunState _pendingResumeState;
+        private string _pendingResumePath;
+        private bool _resumePromptShown;
+        private float _resumePromptShownAt;
+        private Assets.Code.UI.Widgets.ConfirmationDialogBhv _resumeDialog;
+        private readonly object _persistenceLock = new object();
+        private RunStatsTracker.PersistedRunState _pendingPersistenceState;
+        private string _pendingPersistencePath;
+        private int _pendingPersistenceGeneration;
+        private int _persistenceGeneration;
 
         private void Awake()
         {
@@ -77,6 +107,19 @@ namespace DD2DamageMeter
                     new AcceptableValueRange<float>(0.5f, 3f))
             );
             DamageMeterUiSettings.Configure(() => _uiFontSize.Value, () => _uiScale.Value);
+            _autoShowInBattle = Config.Bind(
+                "UI",
+                "AutoShowInBattle",
+                true,
+                "Automatically show the overlay when combat begins."
+            );
+            _autoShowOutsideBattle = Config.Bind(
+                "UI",
+                "AutoShowOutsideBattle",
+                false,
+                "Automatically show the overlay when combat ends."
+            );
+            ApplyAutomaticVisibility(false);
             _autoStartRecording = Config.Bind(
                 "Run",
                 "AutoStartRecording",
@@ -96,25 +139,25 @@ namespace DD2DamageMeter
             _floorEffectSources = new FloorEffectSourceTracker();
             _contributionTracker = new ContributionTracker(_floorEffectSources);
             _tracker = new DamageTracker(_floorEffectSources);
-            _ui = new DamageMeterUI(_tracker, _contributionTracker);
 
             _logTracker = new CombatLogTracker(_floorEffectSources);
             _logUi = new CombatLogUI(_logTracker);
             _statusLogUi = new StatusLogUI(_logTracker);
 
+            _ui = new DamageMeterUI(_tracker, _contributionTracker, _logUi, _statusLogUi);
+
             _runTracker = new RunStatsTracker();
             _runUi = new RunStatsUI(_runTracker, _tracker, _contributionTracker);
+            _runUi.IsBattleActive = () => _battleActive;
 
-            _ui.OnToggleLog = () => { _logUi.IsVisible = !_logUi.IsVisible; };
-            _logUi.OnToggleStatusLog = () => { _statusLogUi.IsVisible = !_statusLogUi.IsVisible; };
             _ui.OnToggleRecording = () =>
             {
                 bool wasRecording = _runTracker.IsRecording;
                 if (wasRecording)
                 {
-                    if (!CaptureLatestRemoteBattle())
+                    if (!CaptureLatestRemoteBattle() && _battleActive)
                     {
-                        _runTracker.CaptureBattle(_tracker, _contributionTracker);
+                        CaptureLocalBattle();
                     }
                 }
                 else
@@ -124,6 +167,9 @@ namespace DD2DamageMeter
                     _lastRemoteCapturedDigest = null;
                 }
                 _runTracker.ToggleRecording();
+                CancelPendingPersistence();
+                DeleteCurrentPersistedState();
+                if (!wasRecording) _runContainsRemoteBattles = false;
             };
             _ui.OnShowRunStats = () => { _runUi.IsVisible = !_runUi.IsVisible; };
             _ui.OnExportCsv = () => { ExportRunCsv(); };
@@ -132,7 +178,9 @@ namespace DD2DamageMeter
             {
                 DamageMeterMpSnapshot remote;
                 bool remoteMode = DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out remote);
-                return _runTracker.GetBattleCount(remoteMode ? null : _tracker, remoteMode ? null : _contributionTracker, remoteMode ? remote : null);
+                bool includeLocalBattle = !remoteMode && _battleActive;
+                bool includeRemoteBattle = remoteMode && IsRemoteCombatActive(remote);
+                return _runTracker.GetBattleCount(includeLocalBattle ? _tracker : null, includeLocalBattle ? _contributionTracker : null, includeRemoteBattle ? remote : null);
             };
             _ui.IsAutoRecordingEnabled = () => _autoStartRecording.Value;
             _ui.OnAutoRecordingChanged = enabled =>
@@ -141,10 +189,24 @@ namespace DD2DamageMeter
                 Config.Save();
                 _autoStartPending = enabled;
                 Log.LogInfo($"Auto start recording {(enabled ? "enabled" : "disabled")}.");
-                if (enabled && _eventManagerReady)
+                if (enabled && _eventManagerReady && _runContextActive)
                 {
                     ApplyAutoStartRecording("setting changed");
                 }
+            };
+            _ui.IsAutoShowInBattleEnabled = () => _autoShowInBattle.Value;
+            _ui.OnAutoShowInBattleChanged = enabled =>
+            {
+                _autoShowInBattle.Value = enabled;
+                Config.Save();
+                Log.LogInfo($"Auto-show in battle {(enabled ? "enabled" : "disabled")}.");
+            };
+            _ui.IsAutoShowOutsideBattleEnabled = () => _autoShowOutsideBattle.Value;
+            _ui.OnAutoShowOutsideBattleChanged = enabled =>
+            {
+                _autoShowOutsideBattle.Value = enabled;
+                Config.Save();
+                Log.LogInfo($"Auto-show outside battle {(enabled ? "enabled" : "disabled")}.");
             };
             _ui.GetExportDirectory = () => _exportDirectory.Value;
             _ui.OnExportDirectoryChanged = directory =>
@@ -180,14 +242,58 @@ namespace DD2DamageMeter
 
         internal DamageTracker Tracker => _tracker;
 
+        internal FloorEffectSourceTracker FloorEffectSources => _floorEffectSources;
+
         internal ContributionTracker ContributionTracker => _contributionTracker;
 
         internal CombatLogTracker LogTracker => _logTracker;
 
+        internal bool IsUndoRestoreInProgress => _undoRestoreInProgress;
+
+        internal void BeginUndoRestore(string restoreId, long epoch)
+        {
+            _undoRestoreInProgress = true;
+            _undoRestoreId = restoreId ?? string.Empty;
+            _undoRestoreEpoch = epoch;
+            _lastCompletedBattleSnapshot = null;
+            _lastRemoteCapturedDigest = null;
+            Log.LogInfo($"DamageMeter undo bridge: begin id={_undoRestoreId}, epoch={_undoRestoreEpoch}.");
+        }
+
+        internal void EndUndoRestore(string restoreId, int combatCount, Guid combatGuid, bool combatActive, bool success)
+        {
+            if (!_undoRestoreInProgress)
+            {
+                Log.LogWarning($"DamageMeter undo bridge: end ignored id={restoreId ?? string.Empty}; no restore is active.");
+                return;
+            }
+
+            bool idMatches = string.IsNullOrEmpty(_undoRestoreId) || string.Equals(_undoRestoreId, restoreId ?? string.Empty, StringComparison.Ordinal);
+            if (!idMatches)
+            {
+                Log.LogWarning($"DamageMeter undo bridge: end id mismatch active={_undoRestoreId}, received={restoreId ?? string.Empty}.");
+                return;
+            }
+
+            if (success && combatCount > 0 && combatGuid != Guid.Empty)
+            {
+                int removed = _runTracker.TrimToCheckpoint(combatCount, combatGuid, combatActive);
+                if (removed > 0)
+                    Log.LogInfo($"DamageMeter undo bridge: trimmed {removed} future battle snapshots.");
+            }
+
+            _undoRestoreInProgress = false;
+            _undoRestoreId = null;
+            _lastRemoteCapturedDigest = null;
+            Log.LogInfo($"DamageMeter undo bridge: end success={success}, epoch={_undoRestoreEpoch}.");
+        }
+
         private void Update()
         {
+            TrackRemoteOverlayVisibility();
             HandleHotkeys();
             TrackRemoteDamageMeterRecording();
+            TryShowResumePrompt();
 
             if (!_eventManagerReady)
             {
@@ -221,6 +327,11 @@ namespace DD2DamageMeter
             Log.LogInfo($"Auto start recording applied ({reason}).");
         }
 
+        private void ApplyAutomaticVisibility(bool inBattle)
+        {
+            _overlayHidden = !(inBattle ? _autoShowInBattle.Value : _autoShowOutsideBattle.Value);
+        }
+
         private void HandleHotkeys()
         {
             var input = BepInEx.UnityInput.Current;
@@ -231,9 +342,10 @@ namespace DD2DamageMeter
             }
             if (input.GetKeyDown(KeyCode.F3))
             {
-                _floorEffectSources.Reset();
-                _tracker.Reset();
-                _contributionTracker.Reset();
+                _ui.ClearRetainedStats();
+                _lastCompletedBattleSnapshot = null;
+                _tracker.Reset(true);
+                _contributionTracker.Reset(true);
                 Log.LogInfo("Damage stats reset.");
             }
             if (input.GetKeyDown(KeyCode.F4))
@@ -261,6 +373,7 @@ namespace DD2DamageMeter
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Skill.Events.EventSkillFinalizeResults>(evt => _tracker.OnSkillFinalizeResults(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Actor.Events.EventActorDeath>(evt => _tracker.OnActorDeath(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventBattleBegin>(evt => OnBattleBegin(evt), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventBattleExit>(evt => OnBattleExit(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventBattleStartRound>(evt => _tracker.OnBattleStartRound(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Dot.Events.EventDotAdded>(evt => _tracker.OnDotAdded(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Dot.Events.EventDotRemoved>(evt => _tracker.OnDotRemoved(evt), false, 0);
@@ -282,6 +395,7 @@ namespace DD2DamageMeter
 
                 // Combat log
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventBattleBegin>(evt => _logTracker.OnBattleBegin(evt), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventBattleExit>(evt => _logTracker.OnBattleExit(), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Combat.Events.EventBattleStartRound>(evt => _logTracker.OnBattleStartRound(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Skill.Events.EventSkillFinalizeResults>(evt => _logTracker.OnSkillFinalizeResults(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Actor.Events.EventActorHealthDamage>(evt => _logTracker.OnHealthDamage(evt), false, 0);
@@ -298,22 +412,461 @@ namespace DD2DamageMeter
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Buff.Events.EventBuffAdded>(evt => _logTracker.OnBuffAdded(evt), false, 0);
                 Assets.Code.Events.EventManager.AddListener<Assets.Code.Buff.Events.EventBuffRemoved>(evt => _logTracker.OnBuffRemoved(evt), false, 0);
 
+                // Run recording persistence
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Run.Events.EventRunStarted>(evt => OnRunStarted(evt), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Run.Events.EventRunEnded>(evt => OnRunEnded(evt), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Utils.Serialization.Events.EventRunSaveCreated>(evt => OnRunSaveCreated(), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Utils.Serialization.Events.EventSaveCurrentGameModeStarted>(evt => OnGameSaveStarted(), false, 0);
+                Assets.Code.Events.EventManager.AddListener<Assets.Code.Utils.Serialization.Events.EventSaveCurrentGameModeCompleted>(evt => OnGameSaveCompleted(), false, 0);
+
                 return true;
             }
             catch { return false; }
         }
 
+        private void OnRunStarted(Assets.Code.Run.Events.EventRunStarted evt)
+        {
+            if (evt != null && evt.m_RunStartType == Assets.Code.Run.RunStartType.IN_CAMPAIGN_GAME_OVER)
+            {
+                _runContextActive = false;
+                _gameCombatManager = evt.m_CombatManager;
+                _resumeCheckpointAvailable = false;
+                _awaitingNewRunIdentity = false;
+                Log.LogInfo("Run recording: game-over results run detected; final statistics retained.");
+                return;
+            }
+
+            _runContextActive = true;
+            bool isRunLoad = evt != null && evt.m_IsRunLoad;
+            bool shouldRecordFresh = _runTracker.IsRecording || _autoStartRecording.Value;
+            uint loadedProfileGuid = 0;
+            Guid loadedRunGuid = Guid.Empty;
+            bool hasLoadedIdentity = isRunLoad && TryGetCurrentRunIdentity(out loadedProfileGuid, out loadedRunGuid);
+            bool sameLoadedRun = hasLoadedIdentity && _runIdentityBound &&
+                loadedProfileGuid == _currentProfileGuid && loadedRunGuid == _currentRunGuid;
+
+            _gameCombatManager = evt == null ? null : evt.m_CombatManager;
+            _resumeCheckpointAvailable = isRunLoad && _gameCombatManager != null;
+            _resumeCheckpointCombatCount = _resumeCheckpointAvailable ? _gameCombatManager.CombatCount : 0;
+            _resumeCheckpointCombatGuid = _resumeCheckpointAvailable ? _gameCombatManager.CombatGuid : Guid.Empty;
+            _resumeCheckpointInCombat = _resumeCheckpointAvailable && evt.m_GameModeType == Assets.Code.Game.GameModeType.COMBAT;
+
+            if (sameLoadedRun)
+            {
+                ClearPendingResume();
+                _awaitingNewRunIdentity = false;
+                if (_resumeCheckpointAvailable)
+                {
+                    int removed = _runTracker.TrimToCheckpoint(
+                        _resumeCheckpointCombatCount,
+                        _resumeCheckpointCombatGuid,
+                        _resumeCheckpointInCombat);
+                    if (removed > 0)
+                        Log.LogWarning($"Run recording: removed {removed} in-memory battles newer than the loaded checkpoint.");
+                }
+                if (_resumeCheckpointAvailable && _runTracker.BattleCount == 0)
+                    QueueResumeForCurrentRun();
+                return;
+            }
+
+            CancelPendingPersistence();
+            ClearPendingResume();
+            _runIdentityBound = false;
+            _currentProfileGuid = 0;
+            _currentRunGuid = Guid.Empty;
+            _runContainsRemoteBattles = false;
+            _runTracker.ResetForRun(shouldRecordFresh);
+
+            _awaitingNewRunIdentity = !isRunLoad;
+            if (_awaitingNewRunIdentity)
+            {
+                Log.LogInfo("Run recording: fresh run detected; waiting for its native RunID.");
+                return;
+            }
+
+            if (!hasLoadedIdentity)
+            {
+                Log.LogWarning("Run recording: continue detected, but the native run identity is unavailable.");
+                return;
+            }
+
+            _currentProfileGuid = loadedProfileGuid;
+            _currentRunGuid = loadedRunGuid;
+            _runIdentityBound = true;
+            QueueResumeForCurrentRun();
+        }
+
+        private void OnRunEnded(Assets.Code.Run.Events.EventRunEnded evt)
+        {
+            _runContextActive = false;
+            if (evt == null || evt.m_RunEndType != Assets.Code.Run.RunEndType.RESET) return;
+
+            CancelPendingPersistence();
+            DeleteCurrentPersistedState();
+            ClearPendingResume();
+            _runTracker.StopRecording();
+            _runIdentityBound = false;
+            _awaitingNewRunIdentity = false;
+            _currentProfileGuid = 0;
+            _currentRunGuid = Guid.Empty;
+            _gameCombatManager = null;
+            _activeGameCombatCount = 0;
+            _activeGameCombatGuid = Guid.Empty;
+            _resumeCheckpointAvailable = false;
+            Log.LogInfo("Run recording: ended run resume state cleared.");
+        }
+
+        private void OnRunSaveCreated()
+        {
+            if (!_awaitingNewRunIdentity && _runIdentityBound) return;
+            if (!TryBindCurrentRunIdentity()) return;
+
+            _awaitingNewRunIdentity = false;
+            DeleteCurrentPersistedState();
+            Log.LogInfo($"Run recording: bound fresh RunID {_currentRunGuid:N}.");
+        }
+
+        private bool TryBindCurrentRunIdentity()
+        {
+            uint profileGuid;
+            Guid runGuid;
+            if (!TryGetCurrentRunIdentity(out profileGuid, out runGuid)) return false;
+
+            _currentProfileGuid = profileGuid;
+            _currentRunGuid = runGuid;
+            _runIdentityBound = true;
+            return true;
+        }
+
+        private static bool TryGetCurrentRunIdentity(out uint profileGuid, out Guid runGuid)
+        {
+            profileGuid = 0;
+            runGuid = Guid.Empty;
+            if (!Assets.Code.Utils.Singleton<Assets.Code.Game.GameTypeMgr>.HasInstance() ||
+                Assets.Code.Utils.Singleton<Assets.Code.Game.GameTypeMgr>.Instance.CurrentGameType != Assets.Code.Game.GameType.EXPEDITION)
+                return false;
+            if (!Assets.Code.Utils.SingletonMonoBehaviour<Assets.Code.Profile.ProfileBhv>.HasInstance(false)) return false;
+
+            profileGuid = Assets.Code.Utils.SingletonMonoBehaviour<Assets.Code.Profile.ProfileBhv>.Instance.GetCurrentProfileGuid();
+            runGuid = Assets.Code.Utils.Serialization.SaveUtils.GetRunGuid();
+            if (profileGuid == 0 || runGuid == Guid.Empty) return false;
+            return true;
+        }
+
+        private void EnsureRunIdentity()
+        {
+            uint profileGuid;
+            Guid runGuid;
+            if (!TryGetCurrentRunIdentity(out profileGuid, out runGuid))
+            {
+                if (!_runIdentityBound) return;
+
+                bool shouldRecord = _runTracker.IsRecording || _autoStartRecording.Value;
+                CancelPendingPersistence();
+                ClearPendingResume();
+                _runIdentityBound = false;
+                _currentProfileGuid = 0;
+                _currentRunGuid = Guid.Empty;
+                _gameCombatManager = null;
+                _activeGameCombatCount = 0;
+                _activeGameCombatGuid = Guid.Empty;
+                _resumeCheckpointAvailable = false;
+                _runTracker.ResetForRun(shouldRecord);
+                Log.LogInfo("Run recording: native Expedition RunID unavailable; persistent resume disabled for this game type.");
+                return;
+            }
+
+            if (_runIdentityBound && profileGuid == _currentProfileGuid && runGuid == _currentRunGuid) return;
+
+            bool freshRun = _awaitingNewRunIdentity;
+            bool shouldRecordFresh = _runTracker.IsRecording || _autoStartRecording.Value;
+            CancelPendingPersistence();
+            ClearPendingResume();
+            _currentProfileGuid = profileGuid;
+            _currentRunGuid = runGuid;
+            _runIdentityBound = true;
+            _awaitingNewRunIdentity = false;
+            _runContainsRemoteBattles = false;
+            _runTracker.ResetForRun(shouldRecordFresh);
+            if (freshRun)
+                DeleteCurrentPersistedState();
+            else if (_resumeCheckpointAvailable)
+                QueueResumeForCurrentRun();
+            else
+                Log.LogWarning("Run recording: RunID changed without a loaded combat checkpoint; resume was skipped.");
+        }
+
+        private void QueueResumeForCurrentRun()
+        {
+            if (!_resumeCheckpointAvailable)
+            {
+                Log.LogWarning("Run recording: resume state ignored because the loaded combat checkpoint is unavailable.");
+                return;
+            }
+
+            string path = GetCurrentPersistencePath();
+            RunStatsTracker.PersistedRunState state;
+            if (!RunStatsTracker.TryReadPersistedState(path, out state))
+            {
+                if (System.IO.File.Exists(path))
+                {
+                    try { System.IO.File.Copy(path, path + ".unreadable", true); }
+                    catch (Exception ex) { Log.LogWarning($"Run recording: could not back up unreadable resume state: {ex.Message}"); }
+                    _runTracker.ResetForRun(true);
+                    Log.LogWarning("Run recording: resume state could not be read; a backup was kept and recording restarted.");
+                }
+                return;
+            }
+
+            if (state.ProfileGuid != _currentProfileGuid || state.RunGuid != _currentRunGuid || state.Snapshots.Count == 0)
+            {
+                RunStatsTracker.DeletePersistedState(path);
+                return;
+            }
+
+            int removed = RunStatsTracker.TrimToCheckpoint(
+                state,
+                _resumeCheckpointCombatCount,
+                _resumeCheckpointCombatGuid,
+                _resumeCheckpointInCombat);
+            if (removed > 0)
+                Log.LogWarning($"Run recording: ignored {removed} battles newer than the loaded game checkpoint.");
+            if (state.Snapshots.Count == 0)
+            {
+                _runTracker.ResetForRun(true);
+                Log.LogInfo("Run recording: no saved battles remain at this checkpoint; recording restarted from here.");
+                return;
+            }
+
+            _pendingResumeState = state;
+            _pendingResumePath = path;
+            _resumePromptShown = false;
+            _runTracker.ResetForRun(false);
+            Log.LogInfo($"Run recording: matching resume state found ({state.Snapshots.Count} battles).");
+        }
+
+        private void TryShowResumePrompt()
+        {
+            if (_pendingResumeState == null) return;
+            if (_resumePromptShown)
+            {
+                if (_resumeDialog == null)
+                    _resumeDialog = UnityEngine.Object.FindObjectOfType<Assets.Code.UI.Widgets.ConfirmationDialogBhv>();
+                Assets.Code.UI.Screens.UiScreenBhv dialogScreen = _resumeDialog == null
+                    ? null
+                    : _resumeDialog.GetComponentInParent<Assets.Code.UI.Screens.UiScreenBhv>();
+                if (dialogScreen != null && dialogScreen.IsOpen()) return;
+                if (Time.unscaledTime - _resumePromptShownAt < 1f) return;
+                _resumePromptShown = false;
+                _resumeDialog = null;
+            }
+            if (!Assets.Code.Utils.SingletonMonoBehaviour<Assets.Code.UI.Managers.CommonUiBhv>.HasInstance(false)) return;
+
+            Assets.Code.UI.Widgets.ConfirmationDialogBhv existingDialog =
+                UnityEngine.Object.FindObjectOfType<Assets.Code.UI.Widgets.ConfirmationDialogBhv>();
+            Assets.Code.UI.Screens.UiScreenBhv existingDialogScreen = existingDialog == null
+                ? null
+                : existingDialog.GetComponentInParent<Assets.Code.UI.Screens.UiScreenBhv>();
+            if (existingDialogScreen != null && existingDialogScreen.IsOpen()) return;
+
+            try
+            {
+                Assets.Code.Utils.SingletonMonoBehaviour<Assets.Code.UI.Managers.CommonUiBhv>.Instance.ShowConfirmationDialog(
+                    Assets.Code.UI.Managers.CommonUiBhv.ConfirmationDialogType.Default,
+                    DmText.T("resumeRecordingTitle"),
+                    DmText.Format("resumeRecordingDescription", _pendingResumeState.Snapshots.Count),
+                    new Action(ContinuePendingRunRecording),
+                    DmText.T("continueRecording"),
+                    new Action(StartFreshRunRecording),
+                    DmText.T("startFreshRecording"),
+                    Assets.Code.UI.Screens.ScreenStackBhv.Layer.Modal,
+                    false);
+                _resumePromptShown = true;
+                _resumePromptShownAt = Time.unscaledTime;
+                _resumeDialog = UnityEngine.Object.FindObjectOfType<Assets.Code.UI.Widgets.ConfirmationDialogBhv>();
+            }
+            catch (Exception ex)
+            {
+                _resumePromptShown = false;
+                Log.LogWarning($"Run recording: resume prompt is not ready yet: {ex.Message}");
+            }
+        }
+
+        private void ContinuePendingRunRecording()
+        {
+            RunStatsTracker.PersistedRunState state = _pendingResumeState;
+            if (state == null) return;
+
+            if (!_runIdentityBound || state.ProfileGuid != _currentProfileGuid || state.RunGuid != _currentRunGuid)
+            {
+                Log.LogWarning("Run recording: resume cancelled because the active RunID changed.");
+                StartFreshRunRecording();
+                return;
+            }
+
+            _runTracker.Resume(state);
+            _runContainsRemoteBattles = false;
+            ClearPendingResume();
+        }
+
+        private void StartFreshRunRecording()
+        {
+            if (_pendingResumeState == null) return;
+            string path = _pendingResumePath;
+            ClearPendingResume();
+            CancelPendingPersistence();
+            RunStatsTracker.DeletePersistedState(path);
+            _runTracker.ResetForRun(true);
+            _runContainsRemoteBattles = false;
+            Log.LogInfo("Run recording: previous resume state discarded.");
+        }
+
+        private void ClearPendingResume()
+        {
+            _pendingResumeState = null;
+            _pendingResumePath = null;
+            _resumePromptShown = false;
+            _resumePromptShownAt = 0f;
+            _resumeDialog = null;
+        }
+
+        private void OnGameSaveStarted()
+        {
+            if (!_runContextActive) return;
+            EnsureRunIdentity();
+            if (_battleActive || !_runIdentityBound || _pendingResumeState != null || _runContainsRemoteBattles) return;
+
+            RunStatsTracker.PersistedRunState state = _runTracker.CreatePersistedState(_currentProfileGuid, _currentRunGuid);
+            if (state == null) return;
+
+            lock (_persistenceLock)
+            {
+                _pendingPersistenceState = state;
+                _pendingPersistencePath = GetCurrentPersistencePath();
+                _pendingPersistenceGeneration = System.Threading.Volatile.Read(ref _persistenceGeneration);
+            }
+        }
+
+        private void OnGameSaveCompleted()
+        {
+            RunStatsTracker.PersistedRunState state;
+            string path;
+            int generation;
+            lock (_persistenceLock)
+            {
+                state = _pendingPersistenceState;
+                path = _pendingPersistencePath;
+                generation = _pendingPersistenceGeneration;
+                _pendingPersistenceState = null;
+                _pendingPersistencePath = null;
+            }
+
+            if (state == null || generation != System.Threading.Volatile.Read(ref _persistenceGeneration)) return;
+            if (!RunStatsTracker.TryWritePersistedState(path, state)) return;
+
+            if (generation != System.Threading.Volatile.Read(ref _persistenceGeneration))
+            {
+                RunStatsTracker.DeletePersistedState(path);
+                return;
+            }
+
+            Log.LogInfo($"Run recording: resume state saved ({state.Snapshots.Count} battles).");
+        }
+
+        private void CancelPendingPersistence()
+        {
+            System.Threading.Interlocked.Increment(ref _persistenceGeneration);
+            lock (_persistenceLock)
+            {
+                _pendingPersistenceState = null;
+                _pendingPersistencePath = null;
+            }
+        }
+
+        private string GetCurrentPersistencePath()
+        {
+            string directory = System.IO.Path.Combine(BepInEx.Paths.ConfigPath, "DD2DamageMeter", "runs");
+            return System.IO.Path.Combine(directory, $"profile_{_currentProfileGuid}_{_currentRunGuid:N}.xml");
+        }
+
+        private void DeleteCurrentPersistedState()
+        {
+            if (_runIdentityBound) RunStatsTracker.DeletePersistedState(GetCurrentPersistencePath());
+        }
+
         private void OnBattleBegin(Assets.Code.Combat.Events.EventBattleBegin evt)
         {
-            // Capture previous battle stats if recording
-            if (_battleActive && _runTracker.IsRecording)
+            _runContextActive = true;
+            EnsureRunIdentity();
+            // Capture previous battle stats if recording.
+            // Normally the battle is captured on EventBattleExit, but this serves
+            // as a fallback for edge cases where EventBattleExit did not fire.
+            if (!_undoRestoreInProgress && _battleActive && _runTracker.IsRecording)
             {
-                _runTracker.CaptureBattle(_tracker, _contributionTracker);
+                CaptureLocalBattle();
             }
+            _lastCompletedBattleSnapshot = null;
+            _activeGameCombatCount = _gameCombatManager == null ? 0 : _gameCombatManager.CombatCount;
+            _activeGameCombatGuid = _gameCombatManager == null ? Guid.Empty : _gameCombatManager.CombatGuid;
             _battleActive = true;
+            _remoteOverlayBattleActive = null;
+            ApplyAutomaticVisibility(true);
+            _ui.ClearRetainedStats();
             _floorEffectSources.Reset();
             _tracker.OnBattleBegin(evt);
             _contributionTracker.OnBattleBegin(evt);
+        }
+
+        private void OnBattleExit(Assets.Code.Combat.Events.EventBattleExit evt)
+        {
+            if (_undoRestoreInProgress)
+            {
+                _lastCompletedBattleSnapshot = null;
+                _ui.ClearRetainedStats();
+                _battleActive = false;
+                ApplyAutomaticVisibility(false);
+                _floorEffectSources.Reset();
+                _tracker.Reset();
+                _contributionTracker.Reset();
+                Log.LogInfo($"Battle exited during undo restore; capture suppressed (epoch={_undoRestoreEpoch}).");
+                return;
+            }
+
+            _lastCompletedBattleSnapshot = _runTracker.CreateStandaloneSnapshot(
+                _tracker,
+                _contributionTracker,
+                _activeGameCombatCount,
+                _activeGameCombatGuid);
+            // Capture the battle immediately on exit so that out-of-combat events
+            // (stress changes, healing in inn, etc.) do not pollute the snapshot.
+            if (_battleActive && _runTracker.IsRecording)
+            {
+                CaptureLocalBattle();
+            }
+            _ui.RetainCurrentStats();
+            _battleActive = false;
+            ApplyAutomaticVisibility(false);
+            _floorEffectSources.Reset();
+            _tracker.Reset();
+            _contributionTracker.Reset();
+            Plugin.Log.LogInfo("Battle exited: stats captured, display retained, and trackers reset.");
+        }
+
+        private void TrackRemoteOverlayVisibility()
+        {
+            if (_battleActive) return;
+
+            DamageMeterMpSnapshot snapshot;
+            if (!DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out snapshot) || snapshot == null || !snapshot.IsAvailable)
+            {
+                if (_remoteOverlayBattleActive == true) ApplyAutomaticVisibility(false);
+                _remoteOverlayBattleActive = null;
+                return;
+            }
+
+            if (_remoteOverlayBattleActive == snapshot.IsActive) return;
+            _remoteOverlayBattleActive = snapshot.IsActive;
+            ApplyAutomaticVisibility(snapshot.IsActive);
         }
 
         private void TrackRemoteDamageMeterRecording()
@@ -378,11 +931,23 @@ namespace DD2DamageMeter
             }
 
             _runTracker.CaptureRemoteSnapshot(snapshot);
+            _runContainsRemoteBattles = true;
+            CancelPendingPersistence();
+            DeleteCurrentPersistedState();
             _lastRemoteCapturedDigest = digest;
             return true;
         }
 
-        private static bool IsRemoteCombatActive(DamageMeterMpSnapshot snapshot)
+        private void CaptureLocalBattle()
+        {
+            _runTracker.CaptureBattle(
+                _tracker,
+                _contributionTracker,
+                _activeGameCombatCount,
+                _activeGameCombatGuid);
+        }
+
+        internal static bool IsRemoteCombatActive(DamageMeterMpSnapshot snapshot)
         {
             if (snapshot == null || !snapshot.IsAvailable || !HasRemoteStats(snapshot))
             {
@@ -477,11 +1042,10 @@ namespace DD2DamageMeter
 
         private void OnGUI()
         {
+            UiInputBlocker.ClearRects();
             if (!_eventManagerReady && !DamageMeterMultiplayerApi.HasRecentRemoteSnapshot()) return;
             if (_overlayHidden) return;
             if (_ui.IsVisible) _ui.Draw();
-            if (_logUi.IsVisible) _logUi.Draw();
-            if (_statusLogUi.IsVisible) _statusLogUi.Draw();
             if (_runUi.IsVisible) _runUi.Draw();
         }
 
@@ -489,24 +1053,48 @@ namespace DD2DamageMeter
         {
             try
             {
-                _tracker.RefreshSnapshot();
-                _contributionTracker.RefreshSnapshot();
+                IReadOnlyList<DamageTracker.ActorStats> playerStats;
+                IReadOnlyList<DamageTracker.ActorStats> enemyStats;
+                IReadOnlyList<ContributionTracker.ContributionStats> contributionStats;
+                float playerTotal;
+                float enemyTotal;
+                if (_battleActive)
+                {
+                    _tracker.RefreshSnapshot();
+                    _contributionTracker.RefreshSnapshot();
+                    playerStats = _tracker.PlayerStats;
+                    enemyStats = _tracker.EnemyStats;
+                    contributionStats = _contributionTracker.PlayerStats;
+                    playerTotal = _tracker.PlayerTotalDamage;
+                    enemyTotal = _tracker.EnemyTotalDamage;
+                }
+                else if (_lastCompletedBattleSnapshot != null)
+                {
+                    playerStats = _lastCompletedBattleSnapshot.PlayerStats;
+                    enemyStats = _lastCompletedBattleSnapshot.EnemyStats;
+                    contributionStats = _lastCompletedBattleSnapshot.ContributionStats;
+                    playerTotal = _lastCompletedBattleSnapshot.PlayerTotalDamage;
+                    enemyTotal = _lastCompletedBattleSnapshot.EnemyTotalDamage;
+                }
+                else
+                {
+                    Log.LogInfo("No current or retained battle data to export.");
+                    return;
+                }
+
                 string timestamp = System.DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string path = System.IO.Path.Combine(GetExportDirectory(), $"DD2_Report_{timestamp}.txt");
 
                 using (var writer = new System.IO.StreamWriter(path, false, System.Text.Encoding.UTF8))
                 {
-                    var contributionStats = _contributionTracker.PlayerStats;
                     writer.WriteLine(DmText.T("reportTitle"));
                     writer.WriteLine(DmText.Format("generated", System.DateTime.Now));
                     writer.WriteLine();
 
                     // Heroes section
-                    var playerStats = _tracker.PlayerStats;
-                    float playerTotal = _tracker.PlayerTotalDamage;
                     writer.WriteLine(DmText.T("sectionHeroes"));
                     writer.WriteLine(DmText.Format("totalDamage", playerTotal));
-                    writer.WriteLine($"{DmText.T("name"),-22} {DmText.T("dmg"),8} {"(DOT)",7} {DmText.T("ovk"),7} {DmText.T("rawTkn"),10} {DmText.T("healOut"),7} {DmText.T("healIn"),7} {DmText.T("kills"),6} {DmText.T("crits"),6} {DmText.T("avoidPct"),7} {DmText.T("comboApplied"),8} {"%DMG",6}");
+                    writer.WriteLine($"{DmText.T("name"),-22} {DmText.T("dmg"),8} {"(DOT)",7} {DmText.T("ovk"),7} {DmText.T("rawTkn"),10} {DmText.T("healOut"),7} {DmText.T("healIn"),7} {DmText.T("kills"),6} {DmText.T("crits"),6} {DmText.T("avoidCount"),7} {DmText.T("comboApplied"),8} {"%DMG",6}");
                     writer.WriteLine(new string('-', 110));
                     if (playerStats != null)
                     {
@@ -516,7 +1104,7 @@ namespace DD2DamageMeter
                             string dotStr = s.DotDamageDealt > 0.5f ? $"({s.DotDamageDealt:F0})" : "-";
                             string ovkStr = s.OverkillDamageDealt > 0.5f ? $"{s.OverkillDamageDealt:F0}" : "-";
                             string takenStr = UiUtil.FormatDamageTaken(s.RawDamageReceived, s.TotalDamageReceived);
-                            string avoidStr = UiUtil.FormatAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks);
+                            string avoidStr = s.AvoidedAttacks > 0 ? s.AvoidedAttacks.ToString() : "-";
                             int comboApplied = GetComboAppliedForActor(contributionStats, s);
                             writer.WriteLine($"{s.ActorName,-22} {s.TotalDamageDealt,8:F0} {dotStr,7} {ovkStr,7} {takenStr,10} {s.TotalHealingDone,7:F0} {s.TotalHealingReceived,7:F0} {s.Kills,6} {s.Crits,6} {avoidStr,7} {comboApplied,8} {pct,5:F1}%");
                         }
@@ -526,11 +1114,9 @@ namespace DD2DamageMeter
                     WriteSkillStressHealReport(writer, playerStats);
 
                     // Enemies section
-                    var enemyStats = _tracker.EnemyStats;
-                    float enemyTotal = _tracker.EnemyTotalDamage;
                     writer.WriteLine(DmText.T("sectionEnemies"));
                     writer.WriteLine(DmText.Format("totalDamage", enemyTotal));
-                    writer.WriteLine($"{DmText.T("name"),-22} {DmText.T("dmg"),8} {"(DOT)",7} {DmText.T("ovk"),7} {DmText.T("rawTkn"),10} {DmText.T("healOut"),7} {DmText.T("healIn"),7} {DmText.T("kills"),6} {DmText.T("crits"),6} {DmText.T("avoidPct"),7} {"%DMG",6}");
+                    writer.WriteLine($"{DmText.T("name"),-22} {DmText.T("dmg"),8} {"(DOT)",7} {DmText.T("ovk"),7} {DmText.T("rawTkn"),10} {DmText.T("healOut"),7} {DmText.T("healIn"),7} {DmText.T("kills"),6} {DmText.T("crits"),6} {DmText.T("avoidCount"),7} {"%DMG",6}");
                     writer.WriteLine(new string('-', 101));
                     if (enemyStats != null)
                     {
@@ -540,7 +1126,7 @@ namespace DD2DamageMeter
                             string dotStr = s.DotDamageDealt > 0.5f ? $"({s.DotDamageDealt:F0})" : "-";
                             string ovkStr = s.OverkillDamageDealt > 0.5f ? $"{s.OverkillDamageDealt:F0}" : "-";
                             string takenStr = UiUtil.FormatDamageTaken(s.RawDamageReceived, s.TotalDamageReceived);
-                            string avoidStr = UiUtil.FormatAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks);
+                            string avoidStr = s.AvoidedAttacks > 0 ? s.AvoidedAttacks.ToString() : "-";
                             writer.WriteLine($"{s.ActorName,-22} {s.TotalDamageDealt,8:F0} {dotStr,7} {ovkStr,7} {takenStr,10} {s.TotalHealingDone,7:F0} {s.TotalHealingReceived,7:F0} {s.Kills,6} {s.Crits,6} {avoidStr,7} {pct,5:F1}%");
                         }
                     }
@@ -705,7 +1291,12 @@ namespace DD2DamageMeter
             {
                 DamageMeterMpSnapshot remote;
                 bool remoteMode = DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out remote);
-                int battleCount = _runTracker.GetBattleCount(remoteMode ? null : _tracker, remoteMode ? null : _contributionTracker, remoteMode ? remote : null);
+                bool includeLocalBattle = !remoteMode && _battleActive;
+                bool includeRemoteBattle = remoteMode && IsRemoteCombatActive(remote);
+                DamageTracker currentTracker = includeLocalBattle ? _tracker : null;
+                ContributionTracker currentContribution = includeLocalBattle ? _contributionTracker : null;
+                DamageMeterMpSnapshot currentRemote = includeRemoteBattle ? remote : null;
+                int battleCount = _runTracker.GetBattleCount(currentTracker, currentContribution, currentRemote);
                 if (battleCount == 0)
                 {
                     Log.LogInfo("No run data to export.");
@@ -713,8 +1304,11 @@ namespace DD2DamageMeter
                 }
                 string timestamp = System.DateTime.Now.ToString("yyyyMMdd_HHmmss");
                 string path = System.IO.Path.Combine(GetExportDirectory(), $"DD2_Run_{timestamp}.csv");
-                _runTracker.ExportCsv(path, remoteMode ? null : _tracker, remoteMode ? null : _contributionTracker, remoteMode ? remote : null);
+                string stressPath = System.IO.Path.Combine(GetExportDirectory(), $"DD2_Run_{timestamp}_StressRelief.csv");
+                _runTracker.ExportCsv(path, currentTracker, currentContribution, currentRemote);
+                _runTracker.ExportStressReliefCsv(stressPath, currentTracker, currentContribution, currentRemote);
                 Log.LogInfo($"Run CSV exported to: {path}");
+                Log.LogInfo($"Stress relief CSV exported to: {stressPath}");
             }
             catch (Exception ex)
             {
@@ -747,7 +1341,7 @@ namespace DD2DamageMeter
             {
                 if (!CaptureLatestRemoteBattle() && _battleActive)
                 {
-                    _runTracker.CaptureBattle(_tracker, _contributionTracker);
+                    CaptureLocalBattle();
                 }
             }
             _harmony?.UnpatchSelf();

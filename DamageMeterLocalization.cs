@@ -146,6 +146,12 @@ namespace DD2DamageMeter
                 case "statsResetEachBattle": return "Stats reset each battle";
                 case "contribution": return "Contribution";
                 case "settingsTitle": return "DD2 Damage Meter Settings";
+                case "autoShowInBattle": return "Auto-show in battle";
+                case "autoShowOutsideBattle": return "Auto-show outside battle";
+                case "resumeRecordingTitle": return "Continue DamageMeter recording?";
+                case "resumeRecordingDescription": return "Found {0} completed battles from this same run. Continue the previous recording?";
+                case "continueRecording": return "Continue recording";
+                case "startFreshRecording": return "Start fresh";
                 case "exportDirectory": return "Export Directory";
                 case "language": return "Language";
                 case "save": return "Save";
@@ -175,18 +181,22 @@ namespace DD2DamageMeter
                 case "sectionBattleLog": return "--- Battle Log ---";
                 case "sectionStatusSummary": return "--- Buff/Debuff Summary ---";
                 case "sectionStatusLog": return "--- Buff/Debuff Log ---";
-                case "sectionSkillStressHeal": return "--- Skill Stress Relief Received ---";
+                case "sectionSkillStressHeal": return "--- Stress Relief Received ---";
                 case "noContribution": return "No contribution recorded.";
                 case "csvTitle": return "=== Run Stats CSV Export ===";
+                case "stressReliefCsvTitle": return "=== Stress Relief CSV Export ===";
                 case "battlesRecorded": return "Battles Recorded: {0}";
                 case "exported": return "Exported: {0:yyyy-MM-dd HH:mm:ss}";
-                case "csvHeroesHeader": return "Name,Battles,TotalDMG,DOT_DMG,OVK_DMG,RawDMG_Taken,ActualDMG_Taken,HealingDone,HealingReceived,Stress,Kills,Crits,AvoidRate,AvoidChecks,AvoidedAttacks,DodgeAvoids,MissAvoids,ComboApplied";
-                case "csvSkillStressHealHeader": return "Name,Battles,SkillStressHealCount,SkillStressHeal";
-                case "csvSkillStressHealBattleHeader": return "Name,SkillStressHealCount,SkillStressHeal";
+                case "csvHeroesHeader": return "Name,Battles,TotalDMG,DOT_DMG,OVK_DMG,RawDMG_Taken,ActualDMG_Taken,HealingDone,HealingReceived,Stress,Kills,Crits,AvoidRate,AvoidCount,AvoidChecks,DodgeAvoids,MissAvoids,ComboApplied";
+                case "csvSkillStressHealHeader": return "Name,Battles,StressReliefCount,StressRelief";
+                case "csvSkillStressHealBattleHeader": return "Name,StressReliefCount,StressRelief";
+                case "csvSkillStressHealBattleFileHeader": return "Battle,Time,Name,StressReliefCount,StressRelief";
+                case "sectionSkillStressHealLog": return "--- Stress Relief Log ---";
+                case "csvSkillStressHealLogHeader": return "Battle,Time,Source,Target,Skill,StressRelief";
                 case "csvContributionHeader": return "Name,TotalContribution,BonusDamage,VulnerableDamage,ShieldPrevented,GuardProtected,DotDamagePrevented,ComboConsumed,ContributionPct";
                 case "csvPerBattle": return "--- Per Battle Breakdown ---";
                 case "csvBattle": return "Battle #{0} ({1:HH:mm:ss})";
-                case "csvTeamHeader": return "Team,Name,DMG,DOT_DMG,OVK_DMG,RawDMG_Taken,ActualDMG_Taken,HealingDone,HealingReceived,Kills,Crits,AvoidRate,AvoidChecks,AvoidedAttacks,DodgeAvoids,MissAvoids,ComboApplied";
+                case "csvTeamHeader": return "Team,Name,DMG,DOT_DMG,OVK_DMG,RawDMG_Taken,ActualDMG_Taken,HealingDone,HealingReceived,Kills,Crits,AvoidRate,AvoidCount,AvoidChecks,DodgeAvoids,MissAvoids,ComboApplied";
                 case "csvHero": return "Hero";
                 case "csvEnemy": return "Enemy";
                 case "name": return "Name";
@@ -202,6 +212,7 @@ namespace DD2DamageMeter
                 case "kills": return "Kills";
                 case "crits": return "Crits";
                 case "avoidPct": return "Avoid%";
+                case "avoidCount": return "Avoids";
                 case "pct": return "%";
                 case "contrib": return "Contrib";
                 case "dmgPlus": return "Dmg+";
@@ -214,6 +225,10 @@ namespace DD2DamageMeter
                 case "wasteShort": return "W";
                 case "comboApplied": return "Combo+";
                 case "comboConsumed": return "Combo!";
+                case "tabStats": return "Stats";
+                case "tabSettings": return "Settings";
+                case "tabBuff": return "Buff";
+                case "langToggle": return "EN";
                 default: return key;
             }
         }
@@ -246,6 +261,12 @@ namespace DD2DamageMeter
                 case "statsResetEachBattle": return "每场战斗会自动重置统计";
                 case "contribution": return "贡献";
                 case "settingsTitle": return "DD2 伤害统计设置";
+                case "autoShowInBattle": return "战斗内自动显示";
+                case "autoShowOutsideBattle": return "战斗外自动显示";
+                case "resumeRecordingTitle": return "继续伤害统计记录？";
+                case "resumeRecordingDescription": return "检测到同一把 Run 已保存的 {0} 场战斗记录，是否接着录制？";
+                case "continueRecording": return "继续记录";
+                case "startFreshRecording": return "重新记录";
                 case "exportDirectory": return "导出目录";
                 case "language": return "语言";
                 case "save": return "保存";
@@ -275,18 +296,22 @@ namespace DD2DamageMeter
                 case "sectionBattleLog": return "--- 战斗日志 ---";
                 case "sectionStatusSummary": return "--- Buff/Debuff 汇总 ---";
                 case "sectionStatusLog": return "--- Buff/Debuff 日志 ---";
-                case "sectionSkillStressHeal": return "--- 技能减压统计 ---";
+                case "sectionSkillStressHeal": return "--- 减压统计 ---";
                 case "noContribution": return "没有记录到贡献。";
                 case "csvTitle": return "=== 本局统计 CSV 导出 ===";
+                case "stressReliefCsvTitle": return "=== 减压统计 CSV 导出 ===";
                 case "battlesRecorded": return "录制战斗数：{0}";
                 case "exported": return "导出时间：{0:yyyy-MM-dd HH:mm:ss}";
-                case "csvHeroesHeader": return "名称,战斗数,总伤害,DOT伤害,溢出伤害,理论承伤,实际承伤,造成治疗,受到治疗,压力,击杀,暴击,闪避率,受击判定,闪避次数,闪避Token,致盲Miss,有效Combo";
-                case "csvSkillStressHealHeader": return "名称,战斗数,技能减压次数,技能减压量";
-                case "csvSkillStressHealBattleHeader": return "名称,技能减压次数,技能减压量";
+                case "csvHeroesHeader": return "名称,战斗数,总伤害,DOT伤害,溢出伤害,理论承伤,实际承伤,造成治疗,受到治疗,压力,击杀,暴击,闪避率,闪避次数,受击判定,闪避Token,致盲Miss,有效Combo";
+                case "csvSkillStressHealHeader": return "名称,战斗数,减压次数,减压量";
+                case "csvSkillStressHealBattleHeader": return "名称,减压次数,减压量";
+                case "csvSkillStressHealBattleFileHeader": return "战斗,时间,名称,减压次数,减压量";
+                case "sectionSkillStressHealLog": return "--- 减压来源日志 ---";
+                case "csvSkillStressHealLogHeader": return "战斗,时间,来源,目标,技能,减压量";
                 case "csvContributionHeader": return "名称,总贡献,增伤贡献,易伤贡献,减伤贡献,守护贡献,阻止DOT伤害,Combo消耗贡献,贡献占比";
                 case "csvPerBattle": return "--- 单场明细 ---";
                 case "csvBattle": return "第 {0} 场（{1:HH:mm:ss}）";
-                case "csvTeamHeader": return "队伍,名称,伤害,DOT伤害,溢出伤害,理论承伤,实际承伤,造成治疗,受到治疗,击杀,暴击,闪避率,受击判定,闪避次数,闪避Token,致盲Miss,有效Combo";
+                case "csvTeamHeader": return "队伍,名称,伤害,DOT伤害,溢出伤害,理论承伤,实际承伤,造成治疗,受到治疗,击杀,暴击,闪避率,闪避次数,受击判定,闪避Token,致盲Miss,有效Combo";
                 case "csvHero": return "我方";
                 case "csvEnemy": return "敌方";
                 case "name": return "名称";
@@ -302,6 +327,7 @@ namespace DD2DamageMeter
                 case "kills": return "击杀";
                 case "crits": return "暴击";
                 case "avoidPct": return "闪避%";
+                case "avoidCount": return "闪避次";
                 case "pct": return "%";
                 case "contrib": return "贡献";
                 case "dmgPlus": return "增伤";
@@ -314,6 +340,10 @@ namespace DD2DamageMeter
                 case "wasteShort": return "废";
                 case "comboApplied": return "Combo+";
                 case "comboConsumed": return "Combo!";
+                case "tabStats": return "统计";
+                case "tabSettings": return "设置";
+                case "tabBuff": return "Buff";
+                case "langToggle": return "EN";
                 default: return key;
             }
         }

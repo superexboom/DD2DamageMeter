@@ -13,6 +13,7 @@ DD2 Damage Meter 是一个用于《Darkest Dungeon II》的非官方 BepInEx 5 �
 - 剔除对尸体造成的无效伤害和溢出治疗，减少假账。
 - 提供可拖拽、可缩放的 IMGUI 窗口，用于实时统计、战斗日志和 Buff/Debuff 日志。
 - 支持跨多场战斗的整局记录，并可合并导出。
+- 支持在重启或闪退后按游戏原生“档案号 + Run ID”续接同一把远征记录，恢复前会弹窗确认。
 - 支持导出可读战斗报告和 CSV 整局统计。
 - 暴露轻量接口，供 DD2SteamMP 和 DD2DamageMeterAdvancedStats 读取数据。
 
@@ -35,6 +36,7 @@ DD2 Damage Meter 是一个用于《Darkest Dungeon II》的非官方 BepInEx 5 �
 - `Buff/Debuff`：从战斗日志窗口打开状态日志。
 - `Record Run`：开始或停止多场战斗记录。
 - `Auto Rec`：记住是否自动开始记录。
+- `设置`：可分别控制战斗内、战斗外是否自动显示；默认分别为开启、关闭。`F2` 仍可临时手动覆盖，直到下一次战斗状态切换。
 - `Run Stats`：查看整局合并统计。
 - `Export CSV`：导出已记录的整局统计。
 - `Export Dir`：选择报告输出目录。
@@ -63,6 +65,7 @@ Darkest Dungeon II/
 - `DD2_Run_yyyyMMdd_HHmmss.csv`：已记录整局统计。
 
 设置由 BepInEx 保存到 `BepInEx/config/com.dd2.damagemeter.cfg`。
+已完成战斗的远征续记数据单独保存在 `BepInEx/config/DD2DamageMeter/runs/`，并且只会在游戏完成一次战斗外存档后提交。
 
 ## 环境要求
 

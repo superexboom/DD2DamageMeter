@@ -13,6 +13,7 @@ This project is for local gameplay analysis, mod debugging, and post-battle revi
 - Filters invalid corpse damage and overheal from normal totals.
 - Provides draggable and resizable IMGUI windows for live combat stats, battle logs, and buff/debuff logs.
 - Supports multi-battle run recording with merged export output.
+- Can resume an Expedition recording after a restart/crash by matching the game's native profile and Run ID, with a confirmation prompt before restoring it.
 - Exports readable battle reports plus CSV run summaries.
 - Exposes a lightweight multiplayer/companion API used by DD2SteamMP and DD2DamageMeterAdvancedStats.
 
@@ -35,6 +36,7 @@ For deeper per-source breakdowns, install [DD2DamageMeterAdvancedStats](https://
 - `Buff/Debuff`: open the status log from the combat log window.
 - `Record Run`: start or stop multi-battle recording.
 - `Auto Rec`: remember whether recording should start automatically.
+- `Settings`: independently choose whether the overlay auto-shows in battle and outside battle. Defaults are on/off respectively; `F2` remains a temporary manual override until the next battle-state change.
 - `Run Stats`: open merged run statistics.
 - `Export CSV`: export the recorded run.
 - `Export Dir`: choose where reports are written.
@@ -63,6 +65,7 @@ By default, exports are written next to the loaded plugin DLL unless a custom ex
 - `DD2_Run_yyyyMMdd_HHmmss.csv`: recorded run summary.
 
 Settings are stored by BepInEx in `BepInEx/config/com.dd2.damagemeter.cfg`.
+Completed-battle Expedition resume data is stored separately under `BepInEx/config/DD2DamageMeter/runs/` and is committed only after the game completes an out-of-combat save.
 
 ## Requirements
 

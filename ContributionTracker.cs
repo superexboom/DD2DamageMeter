@@ -523,7 +523,9 @@ namespace DD2DamageMeter
                     bool isShieldBuff = GetDamageReductionPct(evt.Buff) > 0.0001f;
                     uint providerGuid = evt.PerformerActorGuid;
                     string sourceId = evt.SourceId ?? "";
-                    bool markedFloorBuff = _floorEffectSources.TryResolveBuffSource(evt.TargetActorGuid, evt.Buff.Id, evt.SourceType, evt.SourceId, out var floorMarker);
+                    FloorEffectSourceTracker.SourceMarker floorMarker = null;
+                    bool markedFloorBuff = !IsEligibleFriendlyExternalSource(providerGuid, evt.TargetActorGuid) &&
+                                             _floorEffectSources.TryResolveBuffSource(evt.TargetActorGuid, evt.Buff.Id, evt.SourceType, evt.SourceId, out floorMarker);
                     if (markedFloorBuff)
                     {
                         if (floorMarker.ProviderGuid != 0) providerGuid = floorMarker.ProviderGuid;
@@ -596,28 +598,31 @@ namespace DD2DamageMeter
             }
         }
 
-        public void Reset()
+        public void Reset(bool preserveCombatSources = false)
         {
             lock (_lock)
             {
                 _stats.Clear();
-                _activeEffects.Clear();
-                _pendingDamageEffects.Clear();
-                _pendingVulnerableEffects.Clear();
-                _pendingShieldEffects.Clear();
-                _pendingGuardEffects.Clear();
-                _pendingGuardedDots.Clear();
-                _activeGuardedDots.Clear();
-                _expiredGuardedDots.Clear();
-                _dotProjectedHp.Clear();
-                _activeDotSnapshots.Clear();
-                _statusHints.Clear();
-                _floorEffectSources.Reset();
-                _activeCombos.Clear();
-                _pendingComboConsumes.Clear();
+                if (!preserveCombatSources)
+                {
+                    _activeEffects.Clear();
+                    _pendingDamageEffects.Clear();
+                    _pendingVulnerableEffects.Clear();
+                    _pendingShieldEffects.Clear();
+                    _pendingGuardEffects.Clear();
+                    _pendingGuardedDots.Clear();
+                    _activeGuardedDots.Clear();
+                    _expiredGuardedDots.Clear();
+                    _dotProjectedHp.Clear();
+                    _activeDotSnapshots.Clear();
+                    _statusHints.Clear();
+                    _floorEffectSources.Reset();
+                    _activeCombos.Clear();
+                    _pendingComboConsumes.Clear();
+                    _currentRound = 0;
+                }
                 _playerSnapshot = Array.Empty<ContributionStats>();
                 _snapshotDirty = true;
-                _currentRound = 0;
             }
         }
 

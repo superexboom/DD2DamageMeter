@@ -6,8 +6,10 @@ using Assets.Code.Actor.Events;
 using Assets.Code.Buff.Events;
 using Assets.Code.Combat.Events;
 using Assets.Code.Dot.Events;
+using Assets.Code.Effect;
 using Assets.Code.Events;
 using Assets.Code.Library;
+using Assets.Code.Skill;
 using Assets.Code.Skill.Events;
 using Assets.Code.Source;
 using Assets.Code.Utils;
@@ -42,10 +44,51 @@ namespace DD2DamageMeter
             public float DotDamageReceived;
         }
 
+        public class SkillStressHealLogEntry
+        {
+            public int Sequence;
+            public uint SourceActorGuid;
+            public string SourceActorName;
+            public uint TargetActorGuid;
+            public string TargetActorName;
+            public string SkillId;
+            public string SkillName;
+            public float Amount;
+        }
+
+        private sealed class PendingStressHealSource
+        {
+            public int Sequence;
+            public int Frame;
+            public uint SourceActorGuid;
+            public string SourceActorName;
+            public uint TargetActorGuid;
+            public string TargetActorName;
+            public string SkillId;
+            public string SkillName;
+            public float PredictedAmount;
+        }
+
+        private sealed class PendingHealthHealSource
+        {
+            public int Frame;
+            public uint SourceActorGuid;
+            public uint TargetActorGuid;
+            public SourceType SourceType;
+            public string SourceId;
+            public bool HasDisplayed;
+            public float PredictedAmount;
+        }
+
         private readonly DotSourceTracker _dotSources = new DotSourceTracker();
         private readonly FloorEffectSourceTracker _floorSources;
         private readonly Dictionary<uint, List<uint>> _maledictionSources = new Dictionary<uint, List<uint>>();
         private readonly Dictionary<uint, ProjectedHealth> _dotProjectedHp = new Dictionary<uint, ProjectedHealth>();
+        private readonly Dictionary<uint, Queue<PendingStressHealSource>> _pendingStressHealSources =
+            new Dictionary<uint, Queue<PendingStressHealSource>>();
+        private readonly Dictionary<uint, Queue<PendingHealthHealSource>> _pendingHealthHealSources =
+            new Dictionary<uint, Queue<PendingHealthHealSource>>();
+        private readonly List<SkillStressHealLogEntry> _skillStressHealLog = new List<SkillStressHealLogEntry>();
         // Boss phase detection: guid -> last known name
         private readonly Dictionary<uint, string> _lastKnownName = new Dictionary<uint, string>();
 
@@ -55,6 +98,7 @@ namespace DD2DamageMeter
         private ActorStats[] _enemySnapshot = Array.Empty<ActorStats>();
         private volatile bool _snapshotDirty = true;
         private static readonly Dictionary<uint, string> _nameCache = new Dictionary<uint, string>();
+        private int _skillStressHealLogSequence;
 
         public IReadOnlyList<ActorStats> PlayerStats => _playerSnapshot;
         public IReadOnlyList<ActorStats> EnemyStats => _enemySnapshot;
@@ -279,22 +323,62 @@ namespace DD2DamageMeter
 
         private uint ResolveIndirectDotSource(ActorInstance targetActor, string dotId, string dotType, uint currentSourceActorGuid, SourceType sourceType, string sourceId)
         {
-            uint floorSource = _floorSources.ResolveDotSource(targetActor, dotId, dotType, currentSourceActorGuid, sourceType, sourceId);
-            if (floorSource != 0) return floorSource;
+            return TryResolveDotSource(targetActor, dotId, dotType, currentSourceActorGuid, sourceType, sourceId, out var resolvedGuid, out _, out _)
+                ? resolvedGuid
+                : 0;
+        }
+
+        internal bool TryResolveDotSource(
+            ActorInstance targetActor,
+            string dotId,
+            string dotType,
+            uint currentSourceActorGuid,
+            SourceType sourceType,
+            string sourceId,
+            out uint sourceActorGuid,
+            out string resolvedSourceType,
+            out string resolvedSourceId)
+        {
+            sourceActorGuid = _floorSources.ResolveDotSource(targetActor, dotId, dotType, currentSourceActorGuid, sourceType, sourceId);
+            if (sourceActorGuid != 0)
+            {
+                resolvedSourceType = "floor";
+                resolvedSourceId = sourceId ?? dotId ?? dotType ?? "";
+                return true;
+            }
 
             uint targetGuid = targetActor != null ? targetActor.ActorGuid : 0;
-            if (!IsMaledictionDotType(dotType, dotId)) return 0;
+            if (!IsMaledictionDotType(dotType, dotId))
+            {
+                resolvedSourceType = "";
+                resolvedSourceId = "";
+                return false;
+            }
             if (currentSourceActorGuid != 0 && currentSourceActorGuid != targetGuid && ResolveTeamIndex(currentSourceActorGuid) == 0)
-                return 0;
+            {
+                resolvedSourceType = "";
+                resolvedSourceId = "";
+                return false;
+            }
 
             if (!_maledictionSources.TryGetValue(targetGuid, out var sources) || sources.Count == 0)
-                return 0;
+            {
+                resolvedSourceType = "";
+                resolvedSourceId = "";
+                return false;
+            }
 
             for (int i = sources.Count - 1; i >= 0; i--)
             {
-                if (sources[i] != 0) return sources[i];
+                if (sources[i] == 0) continue;
+                sourceActorGuid = sources[i];
+                resolvedSourceType = "indirect";
+                resolvedSourceId = sourceId ?? dotId ?? dotType ?? "";
+                return true;
             }
-            return 0;
+            resolvedSourceType = "";
+            resolvedSourceId = "";
+            return false;
         }
 
         private static bool IsMaledictionSource(string buffId, string sourceId)
@@ -473,12 +557,20 @@ namespace DD2DamageMeter
             {
                 lock (_lock)
                 {
+                    if (evt == null || evt.m_HealthChange <= 0.01f) return;
+
+                    var pendingSource = TryTakePendingHealthHealSource(evt);
+                    if (pendingSource != null)
+                    {
+                        AddHealingStats(pendingSource.SourceActorGuid, evt.m_ActorGuid, evt.m_TeamIndex, Mathf.Max(0f, evt.m_HealthChange));
+                        UpdateAndMarkDirty();
+                        return;
+                    }
+
                     if (!ShouldTrackStandaloneHeal(evt)) return;
 
-                    var s = GetOrCreate(evt.m_ActorGuid, evt.m_TeamIndex);
                     float effectiveHeal = Mathf.Max(0f, evt.m_HealthChange);
-                    s.TotalHealingReceived += effectiveHeal;
-                    s.TotalHealingDone += effectiveHeal;
+                    AddHealingStats(evt.m_ActorGuid, evt.m_ActorGuid, evt.m_TeamIndex, effectiveHeal);
                     UpdateAndMarkDirty();
                 }
             }
@@ -491,6 +583,7 @@ namespace DD2DamageMeter
 
             SourceType source = evt.m_SourceType;
             if (source == SourceType.SKILL ||
+                source == SourceType.SKILL_BUFF ||
                 source == SourceType.SKILL_ACTOR ||
                 source == SourceType.REST_ITEM ||
                 source == SourceType.INVENTORY ||
@@ -500,6 +593,17 @@ namespace DD2DamageMeter
             }
 
             return true;
+        }
+
+        private void AddHealingStats(uint sourceActorGuid, uint targetActorGuid, int targetTeamIndex, float effectiveHeal)
+        {
+            if (effectiveHeal <= 0.01f) return;
+            var targetStats = GetOrCreate(targetActorGuid, targetTeamIndex);
+            targetStats.TotalHealingReceived += effectiveHeal;
+
+            uint creditedSource = sourceActorGuid != 0 ? sourceActorGuid : targetActorGuid;
+            var sourceStats = GetOrCreate(creditedSource, creditedSource == targetActorGuid ? targetTeamIndex : -1);
+            sourceStats.TotalHealingDone += effectiveHeal;
         }
 
         public void OnStressDamage(EventStressDamage evt)
@@ -515,7 +619,7 @@ namespace DD2DamageMeter
                 if (evt == null ||
                     evt.m_TeamIndex != 0 ||
                     evt.m_StressHealAmount <= 0.01f ||
-                    evt.m_SourceType != SourceType.SKILL)
+                    !ShouldCountStressHealSource(evt.m_SourceType))
                 {
                     return;
                 }
@@ -525,6 +629,20 @@ namespace DD2DamageMeter
                     var s = GetOrCreate(evt.m_ActorGuid, evt.m_TeamIndex);
                     s.SkillStressHealReceived += evt.m_StressHealAmount;
                     s.SkillStressHealReceivedCount++;
+
+                    if (evt.m_SourceType == SourceType.SKILL)
+                    {
+                        var source = TryTakePendingStressHealSource(evt.m_ActorGuid, evt.m_StressHealAmount);
+                        if (source != null)
+                        {
+                            RecordSkillStressHealLog(evt, source);
+                        }
+                    }
+                    else
+                    {
+                        TryTakePendingStressHealSource(evt.m_ActorGuid, evt.m_StressHealAmount);
+                    }
+
                     UpdateAndMarkDirty();
                 }
             }
@@ -547,6 +665,8 @@ namespace DD2DamageMeter
                     foreach (var ar in evt.ActorResults)
                     {
                         if (ar == null) continue;
+                        TrackPendingStressHealSource(ar);
+                        TrackPendingEffectHealthHealSources(ar);
                         uint arPid = ar.m_PerformerActorGuid;
                         uint arTid = ar.m_TargetActorGuid;
                         bool targetIsCorpse = IsCorpseActor(arTid, null);
@@ -591,6 +711,258 @@ namespace DD2DamageMeter
                 }
             }
             catch (Exception ex) { Plugin.Log.LogWarning($"OnSkillFinalizeResults error: {ex.Message}"); }
+        }
+
+        private void TrackPendingEffectHealthHealSources(SkillCalculation.ActorResult ar)
+        {
+            if (ar?.m_AppliedEffectsOutputContainer?.Outputs == null) return;
+
+            List<PendingHealthHealSource> pendingSources = null;
+            foreach (var output in ar.m_AppliedEffectsOutputContainer.Outputs)
+            {
+                if (output?.m_PerformerActor == null ||
+                    output.m_TargetActor == null ||
+                    output.EffectInstancesToApply == null)
+                {
+                    continue;
+                }
+
+                uint sourceGuid = output.m_PerformerActor.ActorGuid;
+                uint targetGuid = output.m_TargetActor.ActorGuid;
+                foreach (EffectInstance effect in output.EffectInstancesToApply)
+                {
+                    if (effect?.EffectDefinition == null || !effect.EffectDefinition.HasHealthHeal)
+                    {
+                        continue;
+                    }
+
+                    float amount = EstimateEffectHealthHeal(output.m_PerformerActor, output.m_TargetActor, effect);
+                    if (amount <= 0.01f) continue;
+
+                    if (pendingSources == null) pendingSources = new List<PendingHealthHealSource>();
+                    PendingHealthHealSource pending = null;
+                    for (int i = 0; i < pendingSources.Count; i++)
+                    {
+                        var candidate = pendingSources[i];
+                        if (candidate.TargetActorGuid == targetGuid &&
+                            candidate.SourceActorGuid == sourceGuid &&
+                            candidate.SourceType == effect.SourceType &&
+                            candidate.HasDisplayed == effect.IsDisplayed)
+                        {
+                            pending = candidate;
+                            break;
+                        }
+                    }
+
+                    if (pending == null)
+                    {
+                        pending = new PendingHealthHealSource
+                        {
+                            Frame = Time.frameCount,
+                            SourceActorGuid = sourceGuid,
+                            TargetActorGuid = targetGuid,
+                            SourceType = effect.SourceType,
+                            SourceId = effect.SourceId,
+                            HasDisplayed = effect.IsDisplayed
+                        };
+                        pendingSources.Add(pending);
+                    }
+
+                    pending.PredictedAmount += amount;
+                }
+            }
+
+            if (pendingSources == null) return;
+            for (int i = 0; i < pendingSources.Count; i++)
+            {
+                EnqueuePendingHealthHealSource(pendingSources[i]);
+            }
+        }
+
+        private static float EstimateEffectHealthHeal(ActorInstance performerActor, ActorInstance targetActor, EffectInstance effect)
+        {
+            if (performerActor == null || targetActor == null || effect == null) return 0f;
+            try
+            {
+                effect.OnApplyStart();
+                float amount = EffectCalculation.GetHealthHeal(performerActor, targetActor, effect);
+                if (effect.SourceType != null && effect.SourceType.m_RoundHealthChange)
+                {
+                    amount = Mathf.Round(amount);
+                }
+                return Mathf.Max(0f, amount);
+            }
+            catch
+            {
+                return 0f;
+            }
+            finally
+            {
+                try { effect.OnApplyEnd(); } catch { }
+            }
+        }
+
+        private void EnqueuePendingHealthHealSource(PendingHealthHealSource pending)
+        {
+            if (pending == null || pending.TargetActorGuid == 0 || pending.PredictedAmount <= 0.01f) return;
+            if (!_pendingHealthHealSources.TryGetValue(pending.TargetActorGuid, out var queue))
+            {
+                queue = new Queue<PendingHealthHealSource>();
+                _pendingHealthHealSources[pending.TargetActorGuid] = queue;
+            }
+
+            queue.Enqueue(pending);
+            while (queue.Count > 32) queue.Dequeue();
+        }
+
+        private PendingHealthHealSource TryTakePendingHealthHealSource(EventActorHealthHeal evt)
+        {
+            if (evt == null ||
+                !_pendingHealthHealSources.TryGetValue(evt.m_ActorGuid, out var queue) ||
+                queue.Count == 0)
+            {
+                return null;
+            }
+
+            int frame = Time.frameCount;
+            const int maxAgeFrames = 1800;
+            const float epsilon = 1.05f;
+            float eventAmount = Mathf.Max(evt.m_HealthHeal, evt.m_HealthChange);
+            while (queue.Count > 0)
+            {
+                var pending = queue.Peek();
+                if (frame - pending.Frame > maxAgeFrames)
+                {
+                    queue.Dequeue();
+                    continue;
+                }
+
+                bool sourceMatches = pending.SourceType == evt.m_SourceType &&
+                                     pending.HasDisplayed == evt.m_HasDisplayed;
+                bool amountMatches = eventAmount <= pending.PredictedAmount + epsilon;
+                if (sourceMatches && amountMatches)
+                {
+                    queue.Dequeue();
+                    return pending;
+                }
+
+                queue.Dequeue();
+            }
+
+            return null;
+        }
+
+        private static bool ShouldCountStressHealSource(SourceType sourceType)
+        {
+            return sourceType == SourceType.SKILL ||
+                   sourceType == SourceType.RELATIONSHIP ||
+                   sourceType == SourceType.AFFINITY;
+        }
+
+        private void TrackPendingStressHealSource(SkillCalculation.ActorResult ar)
+        {
+            if (ar == null ||
+                ar.m_PerformerTeamIndex != 0 ||
+                ar.m_TargetTeamIndex != 0 ||
+                !ar.IsStressHeal)
+            {
+                return;
+            }
+
+            float predictedAmount = ar.StressHeal;
+            if (predictedAmount <= 0.01f) return;
+
+            var pending = new PendingStressHealSource
+            {
+                Sequence = ++_skillStressHealLogSequence,
+                Frame = Time.frameCount,
+                SourceActorGuid = ar.m_PerformerActorGuid,
+                SourceActorName = TryResolveName(ar.m_PerformerActorGuid) ?? $"Actor_{ar.m_PerformerActorGuid}",
+                TargetActorGuid = ar.m_TargetActorGuid,
+                TargetActorName = TryResolveName(ar.m_TargetActorGuid) ?? $"Actor_{ar.m_TargetActorGuid}",
+                SkillId = ar.m_SkillId,
+                SkillName = TryResolveSkillName(ar.m_SkillId),
+                PredictedAmount = predictedAmount
+            };
+
+            if (!_pendingStressHealSources.TryGetValue(pending.TargetActorGuid, out var queue))
+            {
+                queue = new Queue<PendingStressHealSource>();
+                _pendingStressHealSources[pending.TargetActorGuid] = queue;
+            }
+
+            queue.Enqueue(pending);
+            while (queue.Count > 24) queue.Dequeue();
+        }
+
+        private PendingStressHealSource TryTakePendingStressHealSource(uint targetGuid, float actualAmount)
+        {
+            if (!_pendingStressHealSources.TryGetValue(targetGuid, out var queue) || queue.Count == 0)
+            {
+                return null;
+            }
+
+            int frame = Time.frameCount;
+            const int maxAgeFrames = 1800;
+            const float epsilon = 0.05f;
+            while (queue.Count > 0)
+            {
+                var pending = queue.Peek();
+                if (frame - pending.Frame > maxAgeFrames)
+                {
+                    queue.Dequeue();
+                    continue;
+                }
+
+                if (actualAmount <= pending.PredictedAmount + epsilon)
+                {
+                    queue.Dequeue();
+                    return pending;
+                }
+
+                queue.Dequeue();
+            }
+
+            return null;
+        }
+
+        private void RecordSkillStressHealLog(EventStressHeal evt, PendingStressHealSource source)
+        {
+            _skillStressHealLog.Add(new SkillStressHealLogEntry
+            {
+                Sequence = source.Sequence,
+                SourceActorGuid = source.SourceActorGuid,
+                SourceActorName = source.SourceActorName,
+                TargetActorGuid = source.TargetActorGuid,
+                TargetActorName = source.TargetActorName,
+                SkillId = source.SkillId,
+                SkillName = source.SkillName,
+                Amount = evt.m_StressHealAmount
+            });
+        }
+
+        public List<SkillStressHealLogEntry> GetSkillStressHealLogSnapshot()
+        {
+            lock (_lock)
+            {
+                var result = new List<SkillStressHealLogEntry>(_skillStressHealLog.Count);
+                for (int i = 0; i < _skillStressHealLog.Count; i++)
+                {
+                    var e = _skillStressHealLog[i];
+                    result.Add(new SkillStressHealLogEntry
+                    {
+                        Sequence = e.Sequence,
+                        SourceActorGuid = e.SourceActorGuid,
+                        SourceActorName = e.SourceActorName,
+                        TargetActorGuid = e.TargetActorGuid,
+                        TargetActorName = e.TargetActorName,
+                        SkillId = e.SkillId,
+                        SkillName = e.SkillName,
+                        Amount = e.Amount
+                    });
+                }
+                return result;
+            }
         }
 
         private void TrackAvoidance(Assets.Code.Skill.SkillCalculation.ActorResult ar, uint targetGuid)
@@ -934,6 +1306,50 @@ namespace DD2DamageMeter
             return sb.ToString();
         }
 
+        private static string TryResolveSkillName(string skillId)
+        {
+            if (string.IsNullOrWhiteSpace(skillId)) return "[skill]";
+            try
+            {
+                string localized = SkillDescription.GetNameText(skillId);
+                localized = CleanDisplayText(localized);
+                if (!string.IsNullOrWhiteSpace(localized) &&
+                    !string.Equals(localized, "skill_name_" + skillId, StringComparison.OrdinalIgnoreCase))
+                {
+                    return localized;
+                }
+            }
+            catch
+            {
+            }
+
+            return CleanDisplayText(skillId);
+        }
+
+        private static string CleanDisplayText(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return value;
+            value = value.Replace('\r', ' ').Replace('\n', ' ').Replace('\t', ' ').Trim();
+            var sb = new System.Text.StringBuilder(value.Length);
+            bool inTag = false;
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (c == '<')
+                {
+                    inTag = true;
+                    continue;
+                }
+                if (c == '>')
+                {
+                    inTag = false;
+                    continue;
+                }
+                if (!inTag) sb.Append(c);
+            }
+            return sb.ToString().Trim();
+        }
+
         private void UpdateTeamTotals()
         {
             float pd = 0f, ed = 0f;
@@ -951,16 +1367,23 @@ namespace DD2DamageMeter
             _playerSnapshot = players.ToArray(); _enemySnapshot = enemies.ToArray(); _snapshotDirty = false;
         }
 
-        public void Reset()
+        public void Reset(bool preserveCombatSources = false)
         {
             lock (_lock)
             {
                 _stats = new Dictionary<uint, ActorStats>();
-                _dotSources.Reset();
-                _floorSources.Reset();
-                _maledictionSources.Clear();
-                _dotProjectedHp.Clear();
-                _lastKnownName.Clear();
+                if (!preserveCombatSources)
+                {
+                    _dotSources.Reset();
+                    _floorSources.Reset();
+                    _maledictionSources.Clear();
+                    _dotProjectedHp.Clear();
+                    _pendingStressHealSources.Clear();
+                    _pendingHealthHealSources.Clear();
+                    _lastKnownName.Clear();
+                }
+                _skillStressHealLog.Clear();
+                _skillStressHealLogSequence = 0;
                 _playerSnapshot = Array.Empty<ActorStats>();
                 _enemySnapshot = Array.Empty<ActorStats>();
                 PlayerTotalDamage = 0f; EnemyTotalDamage = 0f; _snapshotDirty = true;

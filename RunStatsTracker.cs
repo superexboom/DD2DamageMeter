@@ -2,12 +2,15 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Text;
+using System.Xml.Serialization;
 
 namespace DD2DamageMeter
 {
     // Stores snapshots of ActorStats at the end of each battle for run-level aggregation
     public class RunStatsTracker
     {
+        private const int PersistenceSchema = 2;
+
         public class BattleSnapshot
         {
             public int BattleIndex;
@@ -15,8 +18,21 @@ namespace DD2DamageMeter
             public List<DamageTracker.ActorStats> PlayerStats;
             public List<DamageTracker.ActorStats> EnemyStats;
             public List<ContributionTracker.ContributionStats> ContributionStats;
+            public List<DamageTracker.SkillStressHealLogEntry> SkillStressHealLog;
             public float PlayerTotalDamage;
             public float EnemyTotalDamage;
+            public int GameCombatCount;
+            public Guid GameCombatGuid;
+        }
+
+        public class PersistedRunState
+        {
+            public int Schema;
+            public uint ProfileGuid;
+            public Guid RunGuid;
+            public bool IsRecording;
+            public int BattleCounter;
+            public List<BattleSnapshot> Snapshots = new List<BattleSnapshot>();
         }
 
         // Accumulated merged stats across all recorded battles
@@ -61,6 +77,200 @@ namespace DD2DamageMeter
 
         public bool IsRecording => _isRecording;
         public int BattleCount => _snapshots.Count;
+
+        public void ResetForRun(bool startRecording)
+        {
+            lock (_lock)
+            {
+                _snapshots.Clear();
+                _battleCounter = 0;
+                _isRecording = startRecording;
+                Plugin.Log.LogInfo($"RunStatsTracker: Run state reset; recording={startRecording}.");
+            }
+        }
+
+        public void Resume(PersistedRunState state)
+        {
+            if (state == null) throw new ArgumentNullException(nameof(state));
+
+            lock (_lock)
+            {
+                _snapshots.Clear();
+                if (state.Snapshots != null) _snapshots.AddRange(state.Snapshots);
+
+                _battleCounter = state.BattleCounter;
+                for (int i = 0; i < _snapshots.Count; i++)
+                {
+                    BattleSnapshot snapshot = _snapshots[i];
+                    if (snapshot != null && snapshot.BattleIndex > _battleCounter)
+                        _battleCounter = snapshot.BattleIndex;
+                }
+
+                _isRecording = true;
+                Plugin.Log.LogInfo($"RunStatsTracker: Resumed recording ({_snapshots.Count} battles restored).");
+            }
+        }
+
+        public int TrimToCheckpoint(int combatCount, Guid combatGuid, bool combatActive)
+        {
+            lock (_lock)
+            {
+                int battleCounter;
+                int removed = TrimSnapshotsToCheckpoint(_snapshots, combatCount, combatGuid, combatActive, out battleCounter);
+                _battleCounter = battleCounter;
+                return removed;
+            }
+        }
+
+        public static int TrimToCheckpoint(PersistedRunState state, int combatCount, Guid combatGuid, bool combatActive)
+        {
+            if (state == null || state.Snapshots == null) return 0;
+
+            int battleCounter;
+            int removed = TrimSnapshotsToCheckpoint(state.Snapshots, combatCount, combatGuid, combatActive, out battleCounter);
+            state.BattleCounter = battleCounter;
+            return removed;
+        }
+
+        private static int TrimSnapshotsToCheckpoint(
+            List<BattleSnapshot> snapshots,
+            int combatCount,
+            Guid combatGuid,
+            bool combatActive,
+            out int battleCounter)
+        {
+            int removed = 0;
+            int maxCompletedCombat = combatActive ? combatCount - 1 : combatCount;
+            for (int i = snapshots.Count - 1; i >= 0; i--)
+            {
+                BattleSnapshot snapshot = snapshots[i];
+                bool futureCombat = snapshot.GameCombatCount > maxCompletedCombat;
+                bool differentFrontier = !combatActive && snapshot.GameCombatCount == combatCount &&
+                    snapshot.GameCombatGuid != combatGuid;
+                if (!futureCombat && !differentFrontier) continue;
+
+                snapshots.RemoveAt(i);
+                removed++;
+            }
+
+            battleCounter = 0;
+            for (int i = 0; i < snapshots.Count; i++)
+            {
+                if (snapshots[i].BattleIndex > battleCounter)
+                    battleCounter = snapshots[i].BattleIndex;
+            }
+            return removed;
+        }
+
+        public PersistedRunState CreatePersistedState(uint profileGuid, Guid runGuid)
+        {
+            lock (_lock)
+            {
+                if (!_isRecording || _snapshots.Count == 0) return null;
+                for (int i = 0; i < _snapshots.Count; i++)
+                {
+                    if (_snapshots[i] == null || _snapshots[i].GameCombatCount <= 0 ||
+                        _snapshots[i].GameCombatGuid == Guid.Empty) return null;
+                }
+                return new PersistedRunState
+                {
+                    Schema = PersistenceSchema,
+                    ProfileGuid = profileGuid,
+                    RunGuid = runGuid,
+                    IsRecording = true,
+                    BattleCounter = _battleCounter,
+                    Snapshots = new List<BattleSnapshot>(_snapshots)
+                };
+            }
+        }
+
+        public BattleSnapshot CreateStandaloneSnapshot(
+            DamageTracker tracker,
+            ContributionTracker contributionTracker = null,
+            int gameCombatCount = 0,
+            Guid gameCombatGuid = default(Guid))
+        {
+            lock (_lock)
+            {
+                BattleSnapshot snapshot;
+                if (!TryCreateCurrentSnapshot(tracker, contributionTracker, out snapshot, false)) return null;
+                snapshot.GameCombatCount = gameCombatCount;
+                snapshot.GameCombatGuid = gameCombatGuid;
+                return snapshot;
+            }
+        }
+
+        public static bool TryReadPersistedState(string filePath, out PersistedRunState state)
+        {
+            state = null;
+            if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath)) return false;
+
+            try
+            {
+                using (var reader = new StreamReader(filePath, Encoding.UTF8))
+                    state = (PersistedRunState)new XmlSerializer(typeof(PersistedRunState)).Deserialize(reader);
+                if (state == null || state.Schema != PersistenceSchema || state.ProfileGuid == 0 ||
+                    state.RunGuid == Guid.Empty || !state.IsRecording || state.BattleCounter < 0 || state.Snapshots == null)
+                {
+                    state = null;
+                    return false;
+                }
+                for (int i = 0; i < state.Snapshots.Count; i++)
+                {
+                    if (state.Snapshots[i] == null || state.Snapshots[i].BattleIndex <= 0 ||
+                        state.Snapshots[i].GameCombatCount <= 0 || state.Snapshots[i].GameCombatGuid == Guid.Empty)
+                    {
+                        state = null;
+                        return false;
+                    }
+                }
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"RunStatsTracker: Could not read resume state: {ex.Message}");
+                return false;
+            }
+        }
+
+        public static bool TryWritePersistedState(string filePath, PersistedRunState state)
+        {
+            if (string.IsNullOrEmpty(filePath) || state == null) return false;
+
+            string tempPath = filePath + ".tmp";
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(filePath));
+                using (var writer = new StreamWriter(tempPath, false, new UTF8Encoding(false)))
+                    new XmlSerializer(typeof(PersistedRunState)).Serialize(writer, state);
+                if (File.Exists(filePath))
+                    File.Replace(tempPath, filePath, null);
+                else
+                    File.Move(tempPath, filePath);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"RunStatsTracker: Could not write resume state: {ex.Message}");
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+                return false;
+            }
+        }
+
+        public static void DeletePersistedState(string filePath)
+        {
+            if (string.IsNullOrEmpty(filePath)) return;
+            try
+            {
+                if (File.Exists(filePath)) File.Delete(filePath);
+                string tempPath = filePath + ".tmp";
+                if (File.Exists(tempPath)) File.Delete(tempPath);
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning($"RunStatsTracker: Could not delete resume state: {ex.Message}");
+            }
+        }
 
         public int GetBattleCount(
             DamageTracker currentTracker = null,
@@ -113,7 +323,11 @@ namespace DD2DamageMeter
             }
         }
 
-        public void CaptureBattle(DamageTracker tracker, ContributionTracker contributionTracker = null)
+        public void CaptureBattle(
+            DamageTracker tracker,
+            ContributionTracker contributionTracker = null,
+            int gameCombatCount = 0,
+            Guid gameCombatGuid = default(Guid))
         {
             if (!_isRecording) return;
             try
@@ -122,6 +336,8 @@ namespace DD2DamageMeter
                 {
                     if (!TryCreateCurrentSnapshot(tracker, contributionTracker, out var snapshot)) return;
                     snapshot.BattleIndex = ++_battleCounter;
+                    snapshot.GameCombatCount = gameCombatCount;
+                    snapshot.GameCombatGuid = gameCombatGuid;
                     _snapshots.Add(snapshot);
                     Plugin.Log.LogInfo($"RunStatsTracker: Captured battle #{snapshot.BattleIndex}");
                 }
@@ -151,16 +367,21 @@ namespace DD2DamageMeter
             }
         }
 
-        private bool TryCreateCurrentSnapshot(DamageTracker tracker, ContributionTracker contributionTracker, out BattleSnapshot snapshot)
+        private bool TryCreateCurrentSnapshot(
+            DamageTracker tracker,
+            ContributionTracker contributionTracker,
+            out BattleSnapshot snapshot,
+            bool requireRecording = true)
         {
             snapshot = null;
-            if (!_isRecording || tracker == null) return false;
+            if ((requireRecording && !_isRecording) || tracker == null) return false;
 
             tracker.RefreshSnapshot();
             contributionTracker?.RefreshSnapshot();
             var playerStats = DeepCopyStats(tracker.PlayerStats);
             var enemyStats = DeepCopyStats(tracker.EnemyStats);
             var contributionStats = DeepCopyContributionStats(contributionTracker?.PlayerStats);
+            var stressHealLog = DeepCopySkillStressHealLog(tracker.GetSkillStressHealLogSnapshot());
             if (!HasAnyStats(playerStats) && !HasAnyStats(enemyStats) && !HasAnyContributionStats(contributionStats)) return false;
 
             snapshot = new BattleSnapshot
@@ -170,6 +391,7 @@ namespace DD2DamageMeter
                 PlayerStats = playerStats,
                 EnemyStats = enemyStats,
                 ContributionStats = contributionStats,
+                SkillStressHealLog = stressHealLog,
                 PlayerTotalDamage = tracker.PlayerTotalDamage,
                 EnemyTotalDamage = tracker.EnemyTotalDamage
             };
@@ -193,6 +415,7 @@ namespace DD2DamageMeter
                 PlayerStats = playerStats,
                 EnemyStats = enemyStats,
                 ContributionStats = contributionStats,
+                SkillStressHealLog = new List<DamageTracker.SkillStressHealLogEntry>(),
                 PlayerTotalDamage = source.PlayerTotalDamage,
                 EnemyTotalDamage = source.EnemyTotalDamage
             };
@@ -303,6 +526,29 @@ namespace DD2DamageMeter
                     ShieldWasted = s.ShieldWasted,
                     ComboApplied = s.ComboApplied,
                     ComboConsumed = s.ComboConsumed
+                });
+            }
+            return result;
+        }
+
+        private static List<DamageTracker.SkillStressHealLogEntry> DeepCopySkillStressHealLog(IReadOnlyList<DamageTracker.SkillStressHealLogEntry> source)
+        {
+            var result = new List<DamageTracker.SkillStressHealLogEntry>();
+            if (source == null) return result;
+            for (int i = 0; i < source.Count; i++)
+            {
+                var s = source[i];
+                if (s == null) continue;
+                result.Add(new DamageTracker.SkillStressHealLogEntry
+                {
+                    Sequence = s.Sequence,
+                    SourceActorGuid = s.SourceActorGuid,
+                    SourceActorName = s.SourceActorName,
+                    TargetActorGuid = s.TargetActorGuid,
+                    TargetActorName = s.TargetActorName,
+                    SkillId = s.SkillId,
+                    SkillName = s.SkillName,
+                    Amount = s.Amount
                 });
             }
             return result;
@@ -571,11 +817,8 @@ namespace DD2DamageMeter
                     writer.WriteLine(DmText.T("csvHeroesHeader"));
                     foreach (var s in players)
                     {
-                        writer.WriteLine($"\"{s.ActorName}\",{s.BattlesSeen},{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.TotalStressReceived:F1},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids},{s.ComboApplied}");
+                        writer.WriteLine($"\"{s.ActorName}\",{s.BattlesSeen},{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.TotalStressReceived:F1},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.AvoidedAttacks},{s.IncomingAttacks},{s.DodgeAvoids},{s.MissAvoids},{s.ComboApplied}");
                     }
-                    writer.WriteLine();
-
-                    WriteSkillStressHealSummary(writer, players);
                     writer.WriteLine();
 
                     // Enemies
@@ -583,7 +826,7 @@ namespace DD2DamageMeter
                     writer.WriteLine(DmText.T("csvHeroesHeader"));
                     foreach (var s in enemies)
                     {
-                        writer.WriteLine($"\"{s.ActorName}\",{s.BattlesSeen},{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.TotalStressReceived:F1},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids},{s.ComboApplied}");
+                        writer.WriteLine($"\"{s.ActorName}\",{s.BattlesSeen},{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.TotalStressReceived:F1},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.AvoidedAttacks},{s.IncomingAttacks},{s.DodgeAvoids},{s.MissAvoids},{s.ComboApplied}");
                     }
                     writer.WriteLine();
 
@@ -620,14 +863,13 @@ namespace DD2DamageMeter
                         if (snap.PlayerStats != null)
                         {
                             foreach (var s in snap.PlayerStats)
-                                writer.WriteLine($"{DmText.T("csvHero")},\"{s.ActorName}\",{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids},{GetComboAppliedForActor(snap.ContributionStats, s)}");
+                                writer.WriteLine($"{DmText.T("csvHero")},\"{s.ActorName}\",{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.AvoidedAttacks},{s.IncomingAttacks},{s.DodgeAvoids},{s.MissAvoids},{GetComboAppliedForActor(snap.ContributionStats, s)}");
                         }
                         if (snap.EnemyStats != null)
                         {
                             foreach (var s in snap.EnemyStats)
-                                writer.WriteLine($"{DmText.T("csvEnemy")},\"{s.ActorName}\",{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.IncomingAttacks},{s.AvoidedAttacks},{s.DodgeAvoids},{s.MissAvoids},0");
+                                writer.WriteLine($"{DmText.T("csvEnemy")},\"{s.ActorName}\",{s.TotalDamageDealt:F0},{s.DotDamageDealt:F0},{s.OverkillDamageDealt:F0},{s.RawDamageReceived:F0},{s.TotalDamageReceived:F0},{s.TotalHealingDone:F0},{s.TotalHealingReceived:F0},{s.Kills},{s.Crits},{UiUtil.GetAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks):F1},{s.AvoidedAttacks},{s.IncomingAttacks},{s.DodgeAvoids},{s.MissAvoids},0");
                         }
-                        WriteSkillStressHealBattleSummary(writer, snap.PlayerStats);
                         if (snap.ContributionStats != null && HasAnyContributionStats(snap.ContributionStats))
                         {
                             writer.WriteLine(DmText.T("contribution"));
@@ -663,29 +905,79 @@ namespace DD2DamageMeter
             }
         }
 
-        private static void WriteSkillStressHealSummary(StreamWriter writer, List<MergedStats> players)
+        public void ExportStressReliefCsv(
+            string filePath,
+            DamageTracker currentTracker = null,
+            ContributionTracker currentContribution = null,
+            DamageMeterMpSnapshot currentRemoteSnapshot = null)
         {
-            if (!HasAnySkillStressHealStats(players)) return;
-
-            writer.WriteLine(DmText.T("sectionSkillStressHeal"));
-            writer.WriteLine(DmText.T("csvSkillStressHealHeader"));
-            foreach (var s in players)
+            try
             {
-                if (s == null || (s.SkillStressHealReceived <= 0.01f && s.SkillStressHealReceivedCount <= 0)) continue;
-                writer.WriteLine($"\"{s.ActorName}\",{s.BattlesSeen},{s.SkillStressHealReceivedCount},{s.SkillStressHealReceived:F1}");
+                List<BattleSnapshot> snapshots;
+                List<MergedStats> players;
+                lock (_lock)
+                {
+                    snapshots = GetSnapshotsForRead(currentTracker, currentContribution, currentRemoteSnapshot);
+
+                    var playerMap = new Dictionary<string, MergedStats>();
+                    foreach (var snap in snapshots)
+                    {
+                        MergeTeam(snap.PlayerStats, playerMap);
+                    }
+
+                    players = new List<MergedStats>(playerMap.Values);
+                    players.Sort((a, b) => b.SkillStressHealReceived.CompareTo(a.SkillStressHealReceived));
+                }
+
+                using (var writer = new StreamWriter(filePath, false, Encoding.UTF8))
+                {
+                    writer.WriteLine(DmText.T("stressReliefCsvTitle"));
+                    writer.WriteLine(DmText.Format("battlesRecorded", snapshots.Count));
+                    writer.WriteLine(DmText.Format("exported", DateTime.Now));
+                    writer.WriteLine();
+
+                    writer.WriteLine(DmText.T("sectionSkillStressHeal"));
+                    writer.WriteLine(DmText.T("csvSkillStressHealHeader"));
+                    foreach (var s in players)
+                    {
+                        if (s == null || (s.SkillStressHealReceived <= 0.01f && s.SkillStressHealReceivedCount <= 0)) continue;
+                        writer.WriteLine($"{Csv(s.ActorName)},{s.BattlesSeen},{s.SkillStressHealReceivedCount},{s.SkillStressHealReceived:F1}");
+                    }
+                    writer.WriteLine();
+
+                    writer.WriteLine(DmText.T("csvPerBattle"));
+                    writer.WriteLine(DmText.T("csvSkillStressHealBattleFileHeader"));
+                    foreach (var snap in snapshots)
+                    {
+                        if (!HasAnySkillStressHealStats(snap.PlayerStats)) continue;
+                        foreach (var s in snap.PlayerStats)
+                        {
+                            if (s == null || (s.SkillStressHealReceived <= 0.01f && s.SkillStressHealReceivedCount <= 0)) continue;
+                            writer.WriteLine($"{snap.BattleIndex},{snap.Timestamp:HH:mm:ss},{Csv(s.ActorName)},{s.SkillStressHealReceivedCount},{s.SkillStressHealReceived:F1}");
+                        }
+                    }
+                    writer.WriteLine();
+
+                    writer.WriteLine(DmText.T("sectionSkillStressHealLog"));
+                    writer.WriteLine(DmText.T("csvSkillStressHealLogHeader"));
+                    foreach (var snap in snapshots)
+                    {
+                        if (snap.SkillStressHealLog == null) continue;
+                        var rows = new List<DamageTracker.SkillStressHealLogEntry>(snap.SkillStressHealLog);
+                        rows.Sort((a, b) => a.Sequence.CompareTo(b.Sequence));
+                        foreach (var entry in rows)
+                        {
+                            if (entry == null || entry.Amount <= 0.01f) continue;
+                            string skill = !string.IsNullOrWhiteSpace(entry.SkillName) ? entry.SkillName : entry.SkillId;
+                            writer.WriteLine($"{snap.BattleIndex},{snap.Timestamp:HH:mm:ss},{Csv(entry.SourceActorName)},{Csv(entry.TargetActorName)},{Csv(skill)},{entry.Amount:F1}");
+                        }
+                    }
+                }
+                Plugin.Log.LogInfo($"RunStatsTracker: Stress relief CSV exported to {filePath}");
             }
-        }
-
-        private static void WriteSkillStressHealBattleSummary(StreamWriter writer, List<DamageTracker.ActorStats> players)
-        {
-            if (!HasAnySkillStressHealStats(players)) return;
-
-            writer.WriteLine(DmText.T("sectionSkillStressHeal"));
-            writer.WriteLine(DmText.T("csvSkillStressHealBattleHeader"));
-            foreach (var s in players)
+            catch (Exception ex)
             {
-                if (s == null || (s.SkillStressHealReceived <= 0.01f && s.SkillStressHealReceivedCount <= 0)) continue;
-                writer.WriteLine($"\"{s.ActorName}\",{s.SkillStressHealReceivedCount},{s.SkillStressHealReceived:F1}");
+                Plugin.Log.LogWarning($"RunStatsTracker.ExportStressReliefCsv error: {ex.Message}");
             }
         }
 
@@ -715,6 +1007,12 @@ namespace DD2DamageMeter
                 }
             }
             return false;
+        }
+
+        private static string Csv(string value)
+        {
+            value = value ?? string.Empty;
+            return "\"" + value.Replace("\"", "\"\"") + "\"";
         }
     }
 }

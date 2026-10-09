@@ -93,6 +93,7 @@ namespace DD2DamageMeter
         public List<object> Entries { get; private set; } = new List<object>();
         public List<object> StatusEntries { get; private set; } = new List<object>();
         private int _currentRound;
+        private volatile bool _combatActive;
         private readonly object _lock = new object();
         private volatile bool _dirty = true;
         private volatile bool _statusDirty = true;
@@ -286,6 +287,7 @@ namespace DD2DamageMeter
         {
             lock (_lock)
             {
+                _combatActive = true;
                 Entries.Clear();
                 StatusEntries.Clear();
                 _currentRound = 0;
@@ -302,8 +304,17 @@ namespace DD2DamageMeter
             }
         }
 
+        public void OnBattleExit()
+        {
+            lock (_lock)
+            {
+                _combatActive = false;
+            }
+        }
+
         public void OnBattleStartRound(EventBattleStartRound evt)
         {
+            if (!_combatActive) return;
             lock (_lock)
             {
                 _currentRound = evt.m_Round;
@@ -316,6 +327,7 @@ namespace DD2DamageMeter
 
         public void OnSkillFinalizeResults(EventSkillFinalizeResults evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -583,6 +595,7 @@ namespace DD2DamageMeter
 
         public void OnTokenAdded(EventTokenAdded evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -605,6 +618,7 @@ namespace DD2DamageMeter
 
         public void OnTokenRemoved(EventTokenRemoved evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -625,6 +639,7 @@ namespace DD2DamageMeter
 
         public void OnTokenConsumed(EventTokenConsumed evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -643,6 +658,7 @@ namespace DD2DamageMeter
 
         public void OnTokenReplaced(EventTokenReplaced evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -669,6 +685,7 @@ namespace DD2DamageMeter
 
         public void OnTokenNegated(EventTokenNegated evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -695,6 +712,7 @@ namespace DD2DamageMeter
 
         public void OnBuffAdded(EventBuffAdded evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -722,6 +740,7 @@ namespace DD2DamageMeter
 
         public void OnBuffRemoved(EventBuffRemoved evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -932,6 +951,7 @@ namespace DD2DamageMeter
 
         public void OnDotAdded(EventDotAdded evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -961,6 +981,7 @@ namespace DD2DamageMeter
 
         public void OnDotRemoved(EventDotRemoved evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -973,6 +994,7 @@ namespace DD2DamageMeter
 
         public void OnDotApplied(EventDotApplied evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -1034,7 +1056,7 @@ namespace DD2DamageMeter
                         for (int i = 0; i < shares.Count; i++)
                         {
                             var share = shares[i];
-                            string shareSkillId = !string.IsNullOrEmpty(skillId) ? skillId : (share.SourceId ?? "");
+                            string shareSkillId = !string.IsNullOrEmpty(share.SourceId) ? share.SourceId : skillId;
                             string sourceName = share.SourceActorGuid != 0 ? ResolveName(share.SourceActorGuid) : "[DOT]";
                             bool sourceIsPlayer = share.SourceActorGuid != 0 && IsPlayerTeam(share.SourceActorGuid);
                             float value = share.EffectiveAmount;
@@ -1081,6 +1103,7 @@ namespace DD2DamageMeter
 
         public void OnHealthDamage(EventActorHealthDamage evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -1225,6 +1248,7 @@ namespace DD2DamageMeter
 
         public void OnStressDamage(EventStressDamage evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)
@@ -1246,6 +1270,7 @@ namespace DD2DamageMeter
 
         public void OnActorDeath(EventActorDeath evt)
         {
+            if (!_combatActive) return;
             try
             {
                 lock (_lock)

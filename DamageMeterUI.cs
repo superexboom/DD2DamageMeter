@@ -6,45 +6,92 @@ namespace DD2DamageMeter
 {
     public class DamageMeterUI
     {
-        private float _windowWidth = 760f;
-        private float _windowHeight = 300f;
-        private const float MIN_WIDTH = 620f;
-        private const float MIN_HEIGHT = 200f;
+        // ── Tab system ──
+        public enum Tab { Stats, CombatLog, BuffLog }
+        private Tab _currentTab = Tab.Stats;
+
+        // Per-tab preferred sizes (base values, processed through U())
+        private float[] _tabWidths = { 760f, 760f, 760f };
+        private float[] _tabHeights = { 350f, 430f, 450f };
+        private float[] _tabMinWidths = { 620f, 560f, 560f };
+        private float[] _tabMinHeights = { 200f, 220f, 240f };
+
+        // ── Constants ──
         private const float ROW_HEIGHT = 22f;
         private const float RESIZE_HANDLE = 16f;
         private const float EDGE_MARGIN = 10f;
         private const float HEADER_HEIGHT = 20f;
+        private const float TAB_BAR_HEIGHT = 24f;
+        private const float TOOLBAR_HEIGHT = 28f; // buttons + thin separator
+        private const float SUB_TAB_HEIGHT = 24f;
+        private const float SETTINGS_PANEL_HEIGHT = 72f; // content + thin separator
+        private const float CHROME_HEIGHT = 30f;
+        private const float SCROLL_BOTTOM_MARGIN = 8f;
 
+        // Fixed widths for non-name columns (indices 1-10)
+        private static readonly string[] ColKeys = { "name", "dmg", "dot", "rawTkn", "healOut", "healIn", "kills", "crits", "avoidCount", "comboApplied", "contrib", "pct" };
+        private static readonly float[] FixedColWidths = { 56f, 42f, 68f, 50f, 54f, 38f, 38f, 58f, 54f, 62f, 48f };
+
+        // ── References ──
         private readonly DamageTracker _tracker;
         private readonly ContributionTracker _contributionTracker;
-        private Rect _windowRect = new Rect(10f, 10f, 760f, 300f);
+        private CombatLogUI _logUi;
+        private StatusLogUI _statusLogUi;
+        private List<DisplayActorStats> _retainedPlayerStats;
+        private List<DisplayActorStats> _retainedEnemyStats;
+        private List<DisplayContributionStats> _retainedContributionStats;
+
+        // ── Window state ──
+        private Rect _windowRect = new Rect(210f, 10f, 760f, 350f);
+        private float _windowWidth = 760f;
+        private float _windowHeight = 350f;
         private bool _showPlayerTeam = true;
         private Vector2 _scrollPos;
         private bool _isResizing;
         private Vector2 _resizeStart;
         private float _resizeStartW, _resizeStartH;
 
+        // ── Styles ──
         private GUIStyle _headerStyle;
         private GUIStyle _labelStyle;
         private GUIStyle _valueStyle;
         private GUIStyle _toggleStyle;
         private GUIStyle _windowStyle;
         private GUIStyle _totalStyle;
-        private GUIStyle _resizeStyle;
         private GUIStyle _checkStyle;
+        private GUIStyle _tabActiveStyle;
+        private GUIStyle _tabInactiveStyle;
         private bool _stylesInitialized;
+        private int _styleVersion = -1;
 
-        // Textures for semi-transparent backgrounds
+        // ── Textures ──
         private Texture2D _windowBgTex;
         private Texture2D _headerBgTex;
         private Texture2D _rowAltTex;
+        private Texture2D _heroRowTex;
+        private Texture2D _enemyRowTex;
+        private Texture2D _tabActiveTex;
+        private Texture2D _tabInactiveTex;
+        private Texture2D _toolbarBgTex;
+        private Texture2D _settingsBgTex;
 
-        private static readonly string[] ColKeys = { "name", "dmg", "dot", "rawTkn", "healOut", "healIn", "kills", "crits", "avoidPct", "comboApplied", "contrib", "pct" };
-        // Fixed widths for non-name columns (indices 1-10)
-        private static readonly float[] FixedColWidths = { 56f, 42f, 68f, 50f, 54f, 38f, 38f, 58f, 54f, 62f, 48f };
+        // ── Settings panel ──
+        private bool _showSettings;
+        private bool _exportDirectoryEditInitialized;
+        private string _exportDirectoryEdit = "";
+        private string _settingsMessage = "";
 
+        // ── Remote ──
+        private bool _remoteMode;
+        private DamageMeterMpSnapshot _remoteSnapshot;
+
+        // ── Scale ──
+        private float _scaleFactor = 1f;
+        private int _lastScreenHeight;
+        private int _lastUiSettingsVersion;
+
+        // ── Callbacks ──
         public bool IsVisible { get; set; } = true;
-        public Action OnToggleLog;
         public Action OnToggleRecording;
         public Action OnShowRunStats;
         public Action OnExportCsv;
@@ -52,29 +99,51 @@ namespace DD2DamageMeter
         public Func<int> BattleCount;
         public Func<bool> IsAutoRecordingEnabled;
         public Action<bool> OnAutoRecordingChanged;
+        public Func<bool> IsAutoShowInBattleEnabled;
+        public Action<bool> OnAutoShowInBattleChanged;
+        public Func<bool> IsAutoShowOutsideBattleEnabled;
+        public Action<bool> OnAutoShowOutsideBattleChanged;
         public Func<string> GetExportDirectory;
         public Action<string> OnExportDirectoryChanged;
         public Func<string> GetLanguage;
         public Action<string> OnLanguageChanged;
 
-        private Rect _settingsRect = new Rect(20f, 320f, 540f, 160f);
-        private bool _showSettings;
-        private bool _exportDirectoryEditInitialized;
-        private string _exportDirectoryEdit = "";
-        private string _settingsMessage = "";
-        private bool _remoteMode;
-        private DamageMeterMpSnapshot _remoteSnapshot;
-
-        // Scale factor based on screen resolution
-        private float _scaleFactor = 1f;
-        private int _lastScreenHeight;
-        private int _lastUiSettingsVersion;
-        private int _styleVersion = -1;
-
-        public DamageMeterUI(DamageTracker tracker, ContributionTracker contributionTracker = null)
+        public DamageMeterUI(DamageTracker tracker, ContributionTracker contributionTracker = null,
+            CombatLogUI logUi = null, StatusLogUI statusLogUi = null)
         {
             _tracker = tracker;
             _contributionTracker = contributionTracker;
+            _logUi = logUi;
+            _statusLogUi = statusLogUi;
+        }
+
+        internal void RetainCurrentStats()
+        {
+            _tracker.RefreshSnapshot();
+            _contributionTracker?.RefreshSnapshot();
+            _retainedPlayerStats = BuildLocalActorRows(_tracker.PlayerStats);
+            _retainedEnemyStats = BuildLocalActorRows(_tracker.EnemyStats);
+            _retainedContributionStats = BuildLocalContributionRows(_contributionTracker?.PlayerStats);
+        }
+
+        internal void ClearRetainedStats()
+        {
+            _retainedPlayerStats = null;
+            _retainedEnemyStats = null;
+            _retainedContributionStats = null;
+        }
+
+        public void SwitchToTab(Tab tab)
+        {
+            if (tab == _currentTab) return;
+            // Save current tab's user-adjusted size
+            _tabWidths[(int)_currentTab] = _windowWidth;
+            _tabHeights[(int)_currentTab] = _windowHeight;
+            _currentTab = tab;
+            _windowWidth = Mathf.Max(U(_tabMinWidths[(int)tab]), _tabWidths[(int)tab]);
+            _windowHeight = Mathf.Max(U(_tabMinHeights[(int)tab]), _tabHeights[(int)tab]);
+            _windowRect.width = _windowWidth;
+            _windowRect.height = _windowHeight;
         }
 
         private void UpdateScaleFactor()
@@ -105,12 +174,18 @@ namespace DD2DamageMeter
             int settingsVersion = DamageMeterUiSettings.Version;
             if (_stylesInitialized && _styleVersion == settingsVersion) return;
 
-            // Create semi-transparent textures
-            _windowBgTex = MakeTex(2, 2, new Color(0f, 0f, 0f, 0.35f));
-            _headerBgTex = MakeTex(2, 2, new Color(0f, 0f, 0f, 0.18f));
-            _rowAltTex = MakeTex(2, 2, new Color(0f, 0f, 0f, 0.1f));
+            // ── Textures: DD2 gothic warm palette, all semi-transparent ──
+            _windowBgTex = MakeTex(2, 2, new Color(0.06f, 0.05f, 0.04f, 0.55f));
+            _headerBgTex = MakeTex(2, 2, new Color(0.12f, 0.10f, 0.06f, 0.3f));
+            _rowAltTex = MakeTex(2, 2, new Color(0f, 0f, 0f, 0.08f));
+            _heroRowTex = MakeTex(2, 2, new Color(0.15f, 0.3f, 0.6f, 0.06f));
+            _enemyRowTex = MakeTex(2, 2, new Color(0.6f, 0.15f, 0.15f, 0.06f));
+            _tabActiveTex = MakeTex(2, 2, new Color(0.3f, 0.5f, 0.8f, 0.2f));
+            _tabInactiveTex = MakeTex(2, 2, new Color(0.2f, 0.2f, 0.2f, 0.15f));
+            _toolbarBgTex = MakeTex(2, 2, new Color(0f, 0f, 0f, 0.15f));
+            _settingsBgTex = MakeTex(2, 2, new Color(0.1f, 0.08f, 0.05f, 0.25f));
 
-            // Window style with semi-transparent background
+            // ── Window style ──
             _windowStyle = new GUIStyle(GUI.skin.window);
             _windowStyle.normal.background = _windowBgTex;
             _windowStyle.onNormal.background = _windowBgTex;
@@ -158,12 +233,6 @@ namespace DD2DamageMeter
                 fontStyle = FontStyle.Bold
             };
 
-            _resizeStyle = new GUIStyle(GUI.skin.label)
-            {
-                fontSize = F(11),
-                normal = { textColor = new Color(0.6f, 0.6f, 0.6f, 0.8f) }
-            };
-
             _checkStyle = new GUIStyle(GUI.skin.toggle)
             {
                 fontSize = F(11),
@@ -174,6 +243,21 @@ namespace DD2DamageMeter
                 onHover = { textColor = Color.white }
             };
 
+            _tabActiveStyle = new GUIStyle(GUI.skin.button)
+            {
+                fontSize = F(11),
+                fontStyle = FontStyle.Bold,
+                normal = { textColor = new Color(0.9f, 0.9f, 1f), background = _tabActiveTex },
+                hover = { textColor = Color.white, background = _tabActiveTex }
+            };
+
+            _tabInactiveStyle = new GUIStyle(GUI.skin.button)
+            {
+                fontSize = F(11),
+                normal = { textColor = new Color(0.7f, 0.7f, 0.7f), background = _tabInactiveTex },
+                hover = { textColor = Color.white, background = _tabInactiveTex }
+            };
+
             _styleVersion = settingsVersion;
             _stylesInitialized = true;
         }
@@ -182,7 +266,6 @@ namespace DD2DamageMeter
         {
             float fixedW = 0f;
             foreach (var w in FixedColWidths) fixedW += U(w);
-            // Subtract margins + window chrome padding + scrollbar + safety
             float nameW = _windowWidth - U(EDGE_MARGIN) * 2 - U(30f) - fixedW;
             if (nameW < U(100f)) nameW = U(100f);
             float[] widths = new float[ColKeys.Length];
@@ -195,15 +278,14 @@ namespace DD2DamageMeter
         {
             InitStyles();
             UpdateScaleFactor();
-            _windowWidth = Mathf.Max(U(MIN_WIDTH), _windowWidth);
-            _windowHeight = Mathf.Max(U(MIN_HEIGHT), _windowHeight);
+
+            // Apply per-tab minimums
+            int tabIdx = (int)_currentTab;
+            _windowWidth = Mathf.Max(U(_tabMinWidths[tabIdx]), _windowWidth);
+            _windowHeight = Mathf.Max(U(_tabMinHeights[tabIdx]), _windowHeight);
             _windowRect.width = _windowWidth;
             _windowRect.height = _windowHeight;
-            if (_showSettings)
-            {
-                _settingsRect.width = Mathf.Max(_settingsRect.width, U(540f));
-                _settingsRect.height = Mathf.Max(_settingsRect.height, U(160f));
-            }
+
             _remoteMode = DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out _remoteSnapshot);
             if (!_remoteMode)
             {
@@ -211,21 +293,15 @@ namespace DD2DamageMeter
                 _contributionTracker?.RefreshSnapshot();
             }
 
-            // Apply scale matrix
             var prevMatrix = GUI.matrix;
             GUI.matrix = Matrix4x4.TRS(Vector3.zero, Quaternion.identity, new Vector3(_scaleFactor, _scaleFactor, 1f));
 
-            // Adjust window rect for scaled coordinates
             string title = _remoteMode
                 ? $"{DmText.T("damageMeterTitle")}  [{DmText.T("remoteHost")}]  [{DmText.T("hideHint")}]"
                 : $"{DmText.T("damageMeterTitle")}  [{DmText.T("hideHint")}]  [{DmText.T("resetHint")}]  [{DmText.T("exportHint")}]";
             _windowRect = GUI.Window(729001, _windowRect, DrawWindow, title, _windowStyle);
             _windowRect = UiUtil.ClampToScreen(_windowRect, _scaleFactor);
-            if (_showSettings)
-            {
-                _settingsRect = GUI.Window(729005, _settingsRect, DrawSettingsWindow, DmText.T("settingsTitle"), _windowStyle);
-                _settingsRect = UiUtil.ClampToScreen(_settingsRect, _scaleFactor);
-            }
+            UiInputBlocker.RegisterRect(_windowRect, _scaleFactor);
 
             GUI.matrix = prevMatrix;
             HandleResize();
@@ -234,7 +310,6 @@ namespace DD2DamageMeter
         private void HandleResize()
         {
             Event e = Event.current;
-            // Scale mouse position for resize detection
             float mx = e.mousePosition.x / _scaleFactor;
             float my = e.mousePosition.y / _scaleFactor;
             float resizeHandle = U(RESIZE_HANDLE);
@@ -249,8 +324,8 @@ namespace DD2DamageMeter
             }
             else if (_isResizing && e.type == EventType.MouseDrag)
             {
-                _windowWidth = Mathf.Max(U(MIN_WIDTH), _resizeStartW + (mx - _resizeStart.x));
-                _windowHeight = Mathf.Max(U(MIN_HEIGHT), _resizeStartH + (my - _resizeStart.y));
+                _windowWidth = Mathf.Max(U(_tabMinWidths[(int)_currentTab]), _resizeStartW + (mx - _resizeStart.x));
+                _windowHeight = Mathf.Max(U(_tabMinHeights[(int)_currentTab]), _resizeStartH + (my - _resizeStart.y));
                 _windowRect.width = _windowWidth;
                 _windowRect.height = _windowHeight;
                 _windowRect = UiUtil.ClampToScreen(_windowRect, _scaleFactor);
@@ -259,131 +334,201 @@ namespace DD2DamageMeter
             else if (_isResizing && e.type == EventType.MouseUp)
             {
                 _isResizing = false;
+                // Save resized dimensions to current tab
+                _tabWidths[(int)_currentTab] = _windowWidth;
+                _tabHeights[(int)_currentTab] = _windowHeight;
             }
         }
 
         private void DrawWindow(int id)
         {
-            bool remoteMode = _remoteMode && _remoteSnapshot != null;
             GUILayout.BeginVertical();
             {
-                // Tab buttons row
-                GUILayout.BeginHorizontal();
-                {
-                    Color prevBg = GUI.backgroundColor;
-                    GUI.backgroundColor = _showPlayerTeam ? new Color(0.3f, 0.6f, 0.9f) : new Color(0.4f, 0.4f, 0.4f);
-                    if (GUILayout.Button(DmText.T("heroes"), _toggleStyle, GUILayout.Width(_windowWidth / 2f - U(12)))) _showPlayerTeam = true;
-                    GUI.backgroundColor = !_showPlayerTeam ? new Color(0.9f, 0.3f, 0.3f) : new Color(0.4f, 0.4f, 0.4f);
-                    if (GUILayout.Button(DmText.T("enemies"), _toggleStyle, GUILayout.Width(_windowWidth / 2f - U(56)))) _showPlayerTeam = false;
-                    GUI.backgroundColor = new Color(0.4f, 0.8f, 0.4f);
-                    if (GUILayout.Button(DmText.T("log"), _toggleStyle, GUILayout.Width(U(40)))) OnToggleLog?.Invoke();
-                    GUI.backgroundColor = prevBg;
-                }
-                GUILayout.EndHorizontal();
+                DrawTabBar();
+                DrawToolbar();
 
-                // Action buttons row
-                GUILayout.BeginHorizontal();
-                {
-                    Color prevBg2 = GUI.backgroundColor;
-                    if (remoteMode)
-                    {
-                        bool recording = IsRecording?.Invoke() ?? false;
-                        GUI.backgroundColor = recording ? new Color(0.9f, 0.3f, 0.3f) : new Color(0.4f, 0.4f, 0.4f);
-                        string recLabel = recording ? DmText.Format("recording", BattleCount?.Invoke() ?? 0) : DmText.T("recordRun");
-                        if (GUILayout.Button(recLabel, _toggleStyle, GUILayout.Width(U(150)))) OnToggleRecording?.Invoke();
-                        GUI.backgroundColor = new Color(0.6f, 0.8f, 0.6f);
-                        if (GUILayout.Button(DmText.T("runStats"), _toggleStyle, GUILayout.Width(U(85)))) OnShowRunStats?.Invoke();
-                        GUI.backgroundColor = new Color(0.6f, 0.7f, 0.9f);
-                        if (GUILayout.Button(DmText.T("exportCsv"), _toggleStyle, GUILayout.Width(U(95)))) OnExportCsv?.Invoke();
-                        GUI.backgroundColor = new Color(0.45f, 0.55f, 0.7f);
-                        if (GUILayout.Button(DmText.T("exportDir"), _toggleStyle, GUILayout.Width(U(90))))
-                        {
-                            _showSettings = !_showSettings;
-                            if (_showSettings) LoadExportDirectoryEdit();
-                        }
-                        GUI.backgroundColor = prevBg2;
-                        GUILayout.Label($"r{_remoteSnapshot.Round}/t{_remoteSnapshot.Turn} {_remoteSnapshot.BattleState}", _labelStyle);
-                    }
-                    else
-                    {
-                        bool recording = IsRecording?.Invoke() ?? false;
-                        GUI.backgroundColor = recording ? new Color(0.9f, 0.3f, 0.3f) : new Color(0.4f, 0.4f, 0.4f);
-                        string recLabel = recording ? DmText.Format("recording", BattleCount?.Invoke() ?? 0) : DmText.T("recordRun");
-                        if (GUILayout.Button(recLabel, _toggleStyle, GUILayout.Width(U(150)))) OnToggleRecording?.Invoke();
-                        GUI.backgroundColor = new Color(0.6f, 0.8f, 0.6f);
-                        if (GUILayout.Button(DmText.T("runStats"), _toggleStyle, GUILayout.Width(U(85)))) OnShowRunStats?.Invoke();
-                        GUI.backgroundColor = new Color(0.6f, 0.7f, 0.9f);
-                        if (GUILayout.Button(DmText.T("exportCsv"), _toggleStyle, GUILayout.Width(U(95)))) OnExportCsv?.Invoke();
-                        GUI.backgroundColor = prevBg2;
-                        bool autoRecording = IsAutoRecordingEnabled?.Invoke() ?? false;
-                        bool nextAutoRecording = GUILayout.Toggle(autoRecording, DmText.T("autoRec"), _checkStyle, GUILayout.Width(U(95)));
-                        if (nextAutoRecording != autoRecording) OnAutoRecordingChanged?.Invoke(nextAutoRecording);
-                        if (GUILayout.Button(DmText.T("exportDir"), _toggleStyle, GUILayout.Width(U(90))))
-                        {
-                            _showSettings = !_showSettings;
-                            if (_showSettings) LoadExportDirectoryEdit();
-                        }
-                    }
-                    GUI.backgroundColor = prevBg2;
-                }
-                GUILayout.EndHorizontal();
+                float settingsExtra = _showSettings ? U(SETTINGS_PANEL_HEIGHT) : 0f;
+                float contentH = _windowHeight - U(TAB_BAR_HEIGHT) - U(TOOLBAR_HEIGHT) - U(CHROME_HEIGHT) - settingsExtra - U(SCROLL_BOTTOM_MARGIN);
+                if (contentH < U(60f)) contentH = U(60f);
 
-                if (remoteMode && !_remoteSnapshot.IsAvailable)
+                switch (_currentTab)
                 {
-                    GUILayout.Label(DmText.Format("remoteUnavailable", _remoteSnapshot.UnavailableReason ?? DmText.T("unknown")), _labelStyle);
-                    GUILayout.EndVertical();
-                    GUI.DragWindow(new Rect(0, 0, _windowWidth, _windowHeight - U(RESIZE_HANDLE)));
-                    return;
+                    case Tab.Stats:
+                        DrawStatsContent(contentH);
+                        break;
+                    case Tab.CombatLog:
+                        if (_logUi != null)
+                            _logUi.DrawTabContent(contentH);
+                        break;
+                    case Tab.BuffLog:
+                        if (_statusLogUi != null)
+                            _statusLogUi.DrawTabContent(contentH);
+                        break;
                 }
 
-                List<DisplayActorStats> stats = remoteMode
-                    ? BuildRemoteActorRows(_showPlayerTeam ? _remoteSnapshot.Heroes : _remoteSnapshot.Enemies)
-                    : BuildLocalActorRows(_showPlayerTeam ? _tracker.PlayerStats : _tracker.EnemyStats);
-                float totalDmg = remoteMode
-                    ? (_showPlayerTeam ? _remoteSnapshot.PlayerTotalDamage : _remoteSnapshot.EnemyTotalDamage)
-                    : (_showPlayerTeam ? _tracker.PlayerTotalDamage : _tracker.EnemyTotalDamage);
-                GUILayout.Label(DmText.Format("totalDamage", totalDmg), _totalStyle);
-
-                float[] cw = GetColWidths();
-
-                // Draw column headers using manual Rect positioning (same as data rows)
-                Rect headerRect = GUILayoutUtility.GetRect(_windowWidth - U(RESIZE_HANDLE), U(HEADER_HEIGHT));
-                // Draw header background
-                GUI.color = new Color(1f, 1f, 1f, 1f);
-                GUI.DrawTexture(new Rect(headerRect.x, headerRect.y, headerRect.width, headerRect.height), _headerBgTex);
-                GUI.color = Color.white;
-
-                float hx = headerRect.x + U(EDGE_MARGIN);
-                for (int i = 0; i < ColKeys.Length; i++)
-                {
-                    GUI.Label(new Rect(hx, headerRect.y, cw[i], headerRect.height), DmText.T(ColKeys[i]), _headerStyle);
-                    hx += cw[i];
-                }
-
-                // Scroll area
-                float scrollH = _windowHeight - U(150f);
-                if (scrollH < U(60f)) scrollH = U(60f);
-                _scrollPos = GUILayout.BeginScrollView(_scrollPos, GUILayout.Height(scrollH));
-                {
-                    if (stats == null || stats.Count == 0)
-                    {
-                        GUILayout.Label(DmText.T("statsResetEachBattle"), _labelStyle);
-                    }
-                    else
-                    {
-                        float maxDmg = 1f;
-                        foreach (var s in stats) if (s.TotalDamageDealt > maxDmg) maxDmg = s.TotalDamageDealt;
-                        for (int i = 0; i < stats.Count; i++) DrawActorRow(stats[i], totalDmg > 0 ? totalDmg : 1f, maxDmg, cw, i);
-                    }
-                    if (_showPlayerTeam) DrawContributionSection();
-                }
-                GUILayout.EndScrollView();
-
-                // Resize handle
-                GUI.Label(new Rect(_windowWidth - U(RESIZE_HANDLE) - U(2), _windowHeight - U(RESIZE_HANDLE) - U(2), U(RESIZE_HANDLE), U(RESIZE_HANDLE)), "\u255a", _resizeStyle);
+                if (_showSettings) DrawSettingsPanel();
             }
             GUILayout.EndVertical();
             GUI.DragWindow(new Rect(0, 0, _windowWidth, _windowHeight - U(RESIZE_HANDLE)));
+        }
+
+        private void DrawTabBar()
+        {
+            GUILayout.BeginHorizontal();
+            {
+                Color prevBg = GUI.backgroundColor;
+
+                GUI.backgroundColor = Color.white;
+                if (GUILayout.Button(DmText.T("tabStats"), _currentTab == Tab.Stats ? _tabActiveStyle : _tabInactiveStyle, GUILayout.Width(U(70))))
+                    SwitchToTab(Tab.Stats);
+                if (GUILayout.Button(DmText.T("log"), _currentTab == Tab.CombatLog ? _tabActiveStyle : _tabInactiveStyle, GUILayout.Width(U(70))))
+                    SwitchToTab(Tab.CombatLog);
+                if (!_remoteMode && _statusLogUi != null)
+                {
+                    if (GUILayout.Button(DmText.T("tabBuff"), _currentTab == Tab.BuffLog ? _tabActiveStyle : _tabInactiveStyle, GUILayout.Width(U(70))))
+                        SwitchToTab(Tab.BuffLog);
+                }
+
+                GUILayout.FlexibleSpace();
+
+                GUI.backgroundColor = new Color(0.6f, 0.8f, 0.6f);
+                if (GUILayout.Button(DmText.T("runStats"), _toggleStyle, GUILayout.Width(U(85))))
+                    OnShowRunStats?.Invoke();
+                GUI.backgroundColor = prevBg;
+            }
+            GUILayout.EndHorizontal();
+        }
+
+        private void DrawToolbar()
+        {
+            GUILayout.BeginHorizontal();
+            {
+                Color prevBg = GUI.backgroundColor;
+                bool recording = IsRecording?.Invoke() ?? false;
+
+                // Recording button with pulse
+                if (recording)
+                {
+                    float pulse = 0.7f + 0.3f * Mathf.Sin(Time.realtimeSinceStartup * 3f);
+                    GUI.backgroundColor = new Color(0.9f * pulse, 0.2f, 0.2f);
+                }
+                else
+                {
+                    GUI.backgroundColor = new Color(0.4f, 0.4f, 0.4f);
+                }
+                string recLabel = recording ? DmText.Format("recording", BattleCount?.Invoke() ?? 0) : DmText.T("recordRun");
+                if (GUILayout.Button(recLabel, _toggleStyle, GUILayout.Width(U(150))))
+                    OnToggleRecording?.Invoke();
+
+                if (_remoteMode && _remoteSnapshot != null)
+                {
+                    GUI.backgroundColor = prevBg;
+                    GUILayout.Label($"r{_remoteSnapshot.Round}/t{_remoteSnapshot.Turn} {_remoteSnapshot.BattleState}", _labelStyle);
+                }
+                else
+                {
+                    // Auto-recording toggle
+                    GUI.backgroundColor = prevBg;
+                    bool autoRecording = IsAutoRecordingEnabled?.Invoke() ?? false;
+                    bool nextAutoRecording = GUILayout.Toggle(autoRecording, DmText.T("autoRec"), _checkStyle, GUILayout.Width(U(95)));
+                    if (nextAutoRecording != autoRecording) OnAutoRecordingChanged?.Invoke(nextAutoRecording);
+                }
+
+                GUILayout.FlexibleSpace();
+
+                // Export CSV
+                GUI.backgroundColor = new Color(0.6f, 0.7f, 0.9f);
+                if (GUILayout.Button(DmText.T("exportCsv"), _toggleStyle, GUILayout.Width(U(95))))
+                    OnExportCsv?.Invoke();
+
+                // Settings toggle
+                GUI.backgroundColor = _showSettings ? new Color(0.5f, 0.6f, 0.8f) : new Color(0.35f, 0.35f, 0.4f);
+                if (GUILayout.Button(DmText.T("tabSettings"), _toggleStyle, GUILayout.Width(U(55))))
+                {
+                    _showSettings = !_showSettings;
+                    if (_showSettings) LoadExportDirectoryEdit();
+                }
+
+                // Language toggle
+                GUI.backgroundColor = new Color(0.45f, 0.55f, 0.5f);
+                if (GUILayout.Button(DmText.T("langToggle"), _toggleStyle, GUILayout.Width(U(45))))
+                    OnLanguageChanged?.Invoke(DmText.ToggleLanguageValue());
+
+                GUI.backgroundColor = prevBg;
+            }
+            GUILayout.EndHorizontal();
+
+            // Thin separator line below toolbar
+            Rect sepRect = GUILayoutUtility.GetRect(_windowWidth, U(1f));
+            GUI.DrawTexture(sepRect, _toolbarBgTex);
+            GUILayout.Space(U(3f));
+        }
+
+        private void DrawStatsContent(float contentH)
+        {
+            bool remoteMode = _remoteMode && _remoteSnapshot != null;
+
+            // Sub-tab row (Heroes / Enemies)
+            GUILayout.BeginHorizontal();
+            {
+                Color prevBg = GUI.backgroundColor;
+                GUI.backgroundColor = _showPlayerTeam ? new Color(0.3f, 0.6f, 0.9f) : new Color(0.4f, 0.4f, 0.4f);
+                if (GUILayout.Button(DmText.T("heroes"), _toggleStyle, GUILayout.Width(_windowWidth / 2f - U(12))))
+                    _showPlayerTeam = true;
+                GUI.backgroundColor = !_showPlayerTeam ? new Color(0.9f, 0.3f, 0.3f) : new Color(0.4f, 0.4f, 0.4f);
+                if (GUILayout.Button(DmText.T("enemies"), _toggleStyle, GUILayout.Width(_windowWidth / 2f - U(12))))
+                    _showPlayerTeam = false;
+                GUI.backgroundColor = prevBg;
+            }
+            GUILayout.EndHorizontal();
+
+            if (remoteMode && !_remoteSnapshot.IsAvailable)
+            {
+                GUILayout.Label(DmText.Format("remoteUnavailable", _remoteSnapshot.UnavailableReason ?? DmText.T("unknown")), _labelStyle);
+                return;
+            }
+
+            List<DisplayActorStats> stats = remoteMode
+                ? BuildRemoteActorRows(_showPlayerTeam ? _remoteSnapshot.Heroes : _remoteSnapshot.Enemies)
+                : (_showPlayerTeam ? _retainedPlayerStats : _retainedEnemyStats) ??
+                  BuildLocalActorRows(_showPlayerTeam ? _tracker.PlayerStats : _tracker.EnemyStats);
+            float totalDmg = 0f;
+            for (int i = 0; i < stats.Count; i++) totalDmg += stats[i].TotalDamageDealt;
+            GUILayout.Label(DmText.Format("totalDamage", totalDmg), _totalStyle);
+
+            float[] cw = GetColWidths();
+
+            // Column headers
+            Rect headerRect = GUILayoutUtility.GetRect(_windowWidth - U(RESIZE_HANDLE), U(HEADER_HEIGHT));
+            GUI.color = new Color(1f, 1f, 1f, 1f);
+            GUI.DrawTexture(new Rect(headerRect.x, headerRect.y, headerRect.width, headerRect.height), _headerBgTex);
+            GUI.color = Color.white;
+
+            float hx = headerRect.x + U(EDGE_MARGIN);
+            for (int i = 0; i < ColKeys.Length; i++)
+            {
+                GUI.Label(new Rect(hx, headerRect.y, cw[i], headerRect.height), DmText.T(ColKeys[i]), _headerStyle);
+                hx += cw[i];
+            }
+
+            // Scroll area
+            float scrollH = contentH - U(SUB_TAB_HEIGHT) - U(20f) - U(HEADER_HEIGHT);
+            if (scrollH < U(60f)) scrollH = U(60f);
+            _scrollPos = GUILayout.BeginScrollView(_scrollPos, GUILayout.Height(scrollH));
+            {
+                if (stats == null || stats.Count == 0)
+                {
+                    GUILayout.Label(DmText.T("statsResetEachBattle"), _labelStyle);
+                }
+                else
+                {
+                    float maxDmg = 1f;
+                    foreach (var s in stats) if (s.TotalDamageDealt > maxDmg) maxDmg = s.TotalDamageDealt;
+                    for (int i = 0; i < stats.Count; i++) DrawActorRow(stats[i], totalDmg > 0 ? totalDmg : 1f, maxDmg, cw, i);
+                }
+                if (_showPlayerTeam) DrawContributionSection();
+            }
+            GUILayout.EndScrollView();
         }
 
         private void LoadExportDirectoryEdit()
@@ -393,46 +538,49 @@ namespace DD2DamageMeter
             _settingsMessage = "";
         }
 
-        private void DrawSettingsWindow(int id)
+        private void DrawSettingsPanel()
         {
             if (!_exportDirectoryEditInitialized) LoadExportDirectoryEdit();
 
-            GUILayout.BeginVertical();
+            // Thin separator line above settings
+            Rect sepRect = GUILayoutUtility.GetRect(_windowWidth, U(1f));
+            GUI.DrawTexture(sepRect, _toolbarBgTex);
+            GUILayout.Space(U(3f));
+
+            GUILayout.BeginHorizontal();
             {
-                GUILayout.Label(DmText.T("exportDirectory"), _headerStyle);
-                GUILayout.BeginHorizontal();
+                bool showInBattle = IsAutoShowInBattleEnabled?.Invoke() ?? true;
+                bool nextShowInBattle = GUILayout.Toggle(showInBattle, DmText.T("autoShowInBattle"), _checkStyle, GUILayout.Width(U(190)));
+                if (nextShowInBattle != showInBattle) OnAutoShowInBattleChanged?.Invoke(nextShowInBattle);
+
+                bool showOutsideBattle = IsAutoShowOutsideBattleEnabled?.Invoke() ?? false;
+                bool nextShowOutsideBattle = GUILayout.Toggle(showOutsideBattle, DmText.T("autoShowOutsideBattle"), _checkStyle, GUILayout.Width(U(210)));
+                if (nextShowOutsideBattle != showOutsideBattle) OnAutoShowOutsideBattleChanged?.Invoke(nextShowOutsideBattle);
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Space(U(3f));
+
+            GUILayout.BeginHorizontal();
+            {
+                GUILayout.Label(DmText.T("exportDirectory"), _headerStyle, GUILayout.Width(U(90)));
+                _exportDirectoryEdit = GUILayout.TextField(_exportDirectoryEdit ?? "", GUILayout.Width(Mathf.Max(U(200), _windowWidth - U(280))));
+                if (GUILayout.Button(DmText.T("save"), _toggleStyle, GUILayout.Width(U(55))))
                 {
-                    _exportDirectoryEdit = GUILayout.TextField(_exportDirectoryEdit ?? "", GUILayout.Width(U(400)));
-                    if (GUILayout.Button(DmText.T("save"), _toggleStyle, GUILayout.Width(U(55))))
-                    {
-                        OnExportDirectoryChanged?.Invoke(_exportDirectoryEdit ?? "");
-                        _settingsMessage = DmText.T("saved");
-                    }
-                    if (GUILayout.Button(DmText.T("reset"), _toggleStyle, GUILayout.Width(U(55))))
-                    {
-                        _exportDirectoryEdit = "";
-                        OnExportDirectoryChanged?.Invoke("");
-                        _settingsMessage = DmText.T("default");
-                    }
+                    OnExportDirectoryChanged?.Invoke(_exportDirectoryEdit ?? "");
+                    _settingsMessage = DmText.T("saved");
                 }
-                GUILayout.EndHorizontal();
-                GUILayout.BeginHorizontal();
+                if (GUILayout.Button(DmText.T("reset"), _toggleStyle, GUILayout.Width(U(55))))
                 {
-                    GUILayout.Label(DmText.T("language"), _headerStyle, GUILayout.Width(U(110)));
-                    string languageLabel = DmText.Format("languageButton", GetLanguage?.Invoke() ?? DmText.LanguageDisplay());
-                    if (GUILayout.Button(languageLabel, _toggleStyle, GUILayout.Width(U(140))))
-                    {
-                        OnLanguageChanged?.Invoke(DmText.ToggleLanguageValue());
-                    }
-                }
-                GUILayout.EndHorizontal();
-                if (!string.IsNullOrEmpty(_settingsMessage))
-                {
-                    GUILayout.Label(_settingsMessage, _labelStyle);
+                    _exportDirectoryEdit = "";
+                    OnExportDirectoryChanged?.Invoke("");
+                    _settingsMessage = DmText.T("default");
                 }
             }
-            GUILayout.EndVertical();
-            GUI.DragWindow(new Rect(0, 0, _settingsRect.width, _settingsRect.height));
+            GUILayout.EndHorizontal();
+            if (!string.IsNullOrEmpty(_settingsMessage))
+            {
+                GUILayout.Label(_settingsMessage, _labelStyle);
+            }
         }
 
         private void DrawActorRow(DisplayActorStats s, float teamTotalDmg, float maxDmg, float[] cw, int rowIndex)
@@ -441,14 +589,16 @@ namespace DD2DamageMeter
             float barPct = maxDmg > 0 ? s.TotalDamageDealt / maxDmg : 0f;
             Rect row = GUILayoutUtility.GetRect(_windowWidth - U(RESIZE_HANDLE), U(ROW_HEIGHT));
 
-            // Alternate row background for readability
+            // Team-tinted row background (very subtle)
+            GUI.DrawTexture(new Rect(row.x, row.y, row.width, row.height), _showPlayerTeam ? _heroRowTex : _enemyRowTex);
+            // Alternate row overlay for readability
             if (rowIndex % 2 == 1)
             {
                 GUI.DrawTexture(new Rect(row.x, row.y, row.width, row.height), _rowAltTex);
             }
 
             // Damage bar
-            Color bc = _showPlayerTeam ? new Color(0.2f, 0.4f, 0.8f, 0.35f) : new Color(0.8f, 0.2f, 0.2f, 0.35f);
+            Color bc = _showPlayerTeam ? new Color(0.2f, 0.4f, 0.8f, 0.3f) : new Color(0.8f, 0.2f, 0.2f, 0.3f);
             if (barPct > 0f)
             {
                 GUI.color = bc;
@@ -461,14 +611,13 @@ namespace DD2DamageMeter
             GUI.Label(new Rect(x, y, cw[0], h), dn, _labelStyle); x += cw[0];
             GUI.Label(new Rect(x, y, cw[1], h), $"{s.TotalDamageDealt:F0}", _valueStyle); x += cw[1];
             GUI.Label(new Rect(x, y, cw[2], h), s.DotDamageDealt > 0 ? $"{s.DotDamageDealt:F0}" : "-", _valueStyle); x += cw[2];
-            // Show raw (pre-shield) damage; if shielded, show "raw(actual)" format
             string takenStr = UiUtil.FormatDamageTaken(s.RawDamageReceived, s.TotalDamageReceived);
             GUI.Label(new Rect(x, y, cw[3], h), takenStr, _valueStyle); x += cw[3];
             GUI.Label(new Rect(x, y, cw[4], h), s.TotalHealingDone > 0 ? $"{s.TotalHealingDone:F0}" : "-", _valueStyle); x += cw[4];
             GUI.Label(new Rect(x, y, cw[5], h), s.TotalHealingReceived > 0 ? $"{s.TotalHealingReceived:F0}" : "-", _valueStyle); x += cw[5];
             GUI.Label(new Rect(x, y, cw[6], h), s.Kills > 0 ? $"{s.Kills}" : "-", _valueStyle); x += cw[6];
             GUI.Label(new Rect(x, y, cw[7], h), s.Crits > 0 ? $"{s.Crits}" : "-", _valueStyle); x += cw[7];
-            GUI.Label(new Rect(x, y, cw[8], h), UiUtil.FormatAvoidanceRate(s.AvoidedAttacks, s.IncomingAttacks), _valueStyle); x += cw[8];
+            GUI.Label(new Rect(x, y, cw[8], h), s.AvoidedAttacks > 0 ? $"{s.AvoidedAttacks}" : "-", _valueStyle); x += cw[8];
             DisplayContributionStats contributionStats = FindContribution(s.ActorGuid, s.ActorGuidString, s.ActorName);
             float contribution = contributionStats != null ? contributionStats.TotalContribution : 0f;
             int comboApplied = contributionStats != null ? contributionStats.ComboApplied : 0;
@@ -481,7 +630,7 @@ namespace DD2DamageMeter
         {
             List<DisplayContributionStats> rows = _remoteMode && _remoteSnapshot != null
                 ? BuildRemoteContributionRows(_remoteSnapshot.Contributions)
-                : BuildLocalContributionRows(_contributionTracker == null ? null : _contributionTracker.PlayerStats);
+                : GetLocalContributionRows();
             if (rows == null || rows.Count == 0) return;
 
             float total = 0f;
@@ -527,6 +676,7 @@ namespace DD2DamageMeter
                 var s = rows[i];
                 if (s.TotalContribution <= 0.01f && s.ComboConsumed <= 0) continue;
                 Rect row = GUILayoutUtility.GetRect(_windowWidth - U(RESIZE_HANDLE), U(ROW_HEIGHT));
+                GUI.DrawTexture(new Rect(row.x, row.y, row.width, row.height), _heroRowTex);
                 if (drawn % 2 == 1) GUI.DrawTexture(new Rect(row.x, row.y, row.width, row.height), _rowAltTex);
 
                 float x = row.x + U(EDGE_MARGIN), y = row.y, h = row.height;
@@ -549,7 +699,7 @@ namespace DD2DamageMeter
         {
             List<DisplayContributionStats> rows = _remoteMode && _remoteSnapshot != null
                 ? BuildRemoteContributionRows(_remoteSnapshot.Contributions)
-                : BuildLocalContributionRows(_contributionTracker == null ? null : _contributionTracker.PlayerStats);
+                : GetLocalContributionRows();
             if (rows == null) return null;
             for (int i = 0; i < rows.Count; i++)
             {
@@ -561,6 +711,12 @@ namespace DD2DamageMeter
                     return s;
             }
             return null;
+        }
+
+        private List<DisplayContributionStats> GetLocalContributionRows()
+        {
+            return _retainedContributionStats ??
+                   BuildLocalContributionRows(_contributionTracker == null ? null : _contributionTracker.PlayerStats);
         }
 
         private static List<DisplayActorStats> BuildLocalActorRows(IReadOnlyList<DamageTracker.ActorStats> rows)

@@ -32,6 +32,51 @@ namespace DD2DamageMeter
 
         public CombatLogUI(CombatLogTracker t) { _tracker = t; }
 
+        /// <summary>
+        /// Draw combat log content inside a parent window's layout (tab mode).
+        /// Does not create its own window or handle resize.
+        /// </summary>
+        public void DrawTabContent(float height)
+        {
+            Init();
+            UpdateScaleFactor();
+            _remoteMode = DamageMeterMultiplayerApi.TryGetRemoteSnapshot(out _remoteSnapshot);
+
+            if (_remoteMode)
+            {
+                GUILayout.Label(DmText.T("remoteCombatLog"), _nm);
+            }
+
+            float scrollH = height - (_remoteMode ? U(20f) : 0f);
+            if (scrollH < U(60f)) scrollH = U(60f);
+
+            _scroll = GUILayout.BeginScrollView(_scroll, GUILayout.Height(scrollH));
+            {
+                if (_remoteMode)
+                {
+                    DrawRemoteEntries();
+                }
+                else
+                {
+                    var entries = _tracker.Entries;
+                    if (entries.Count == 0)
+                    {
+                        GUILayout.Label(DmText.T("noCombatLog"), _nm);
+                    }
+                    else
+                    {
+                        if (_tracker.IsDirty) { _scroll.y = float.MaxValue; _tracker.ClearDirty(); }
+                        for (int i = 0; i < entries.Count; i++)
+                        {
+                            if (entries[i] is CombatLogTracker.RoundHeader rh) GUILayout.Label(DmText.Format("round", rh.Round), _round);
+                            else if (entries[i] is CombatLogTracker.LogEntry le) DrawEntry(le);
+                        }
+                    }
+                }
+            }
+            GUILayout.EndScrollView();
+        }
+
         private Texture2D MakeTex(int w, int h, Color c)
         {
             var pix = new Color[w * h];
@@ -107,6 +152,7 @@ namespace DD2DamageMeter
             string title = _remoteMode ? $"{DmText.T("battleLogTitle")}  [{DmText.T("remoteHost")}]" : DmText.T("battleLogTitle");
             _rect = GUI.Window(729002, _rect, Win, title, _windowStyle);
             _rect = UiUtil.ClampToScreen(_rect, _scaleFactor);
+            UiInputBlocker.RegisterRect(_rect, _scaleFactor);
 
             GUI.matrix = prevMatrix;
 
